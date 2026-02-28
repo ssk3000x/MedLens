@@ -58,8 +58,12 @@ export function SessionView({ onStop }: { onStop: () => void }) {
   const [detections, setDetections] = useState<Detection[]>([])
   const [currentMessage, setCurrentMessage] = useState("")
   const [isListening, setIsListening] = useState(false)
+  const [stream, setStream] = useState<MediaStream | null>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+  const [cameraError, setCameraError] = useState<string | null>(null)
   const [sessionTime, setSessionTime] = useState(0)
   const timeoutRefs = useRef<NodeJS.Timeout[]>([])
+  const videoRef = useRef<HTMLVideoElement | null>(null)
 
   // Session timer
   useEffect(() => {
@@ -94,6 +98,139 @@ export function SessionView({ onStop }: { onStop: () => void }) {
     }
   }, [])
 
+  // Camera start handler (callable from a user gesture on mobile)
+  const startCamera = useCallback(async () => {
+    let localStream: MediaStream | null = null
+    try {
+      const constraints = {
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+        audio: false,
+      }
+
+      if (navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === "function") {
+        localStream = await navigator.mediaDevices.getUserMedia(constraints)
+      } else {
+        // legacy fallback for older WebKit builds on iOS
+        const legacyGetUserMedia = (navigator as any).getUserMedia || (navigator as any).webkitGetUserMedia || (navigator as any).mozGetUserMedia
+        if (!legacyGetUserMedia) {
+          throw new Error("getUserMedia is not supported in this browser. Try Safari or update iOS and use HTTPS.")
+        }
+        localStream = await new Promise<MediaStream>((resolve, reject) => {
+          legacyGetUserMedia.call(navigator, constraints, resolve, reject)
+        })
+      }
+
+      setStream(localStream)
+      streamRef.current = localStream
+      setCameraError(null)
+      if (videoRef.current) {
+        try {
+          videoRef.current.srcObject = localStream
+        } catch (e) {
+          // ignore assignment errors in some environments
+        }
+      }
+    } catch (err: any) {
+      // Improve message when getUserMedia is not available vs permission denied
+      const msg = err?.message || String(err) || "Camera permission denied or not available"
+      setCameraError(msg)
+    }
+
+    return () => {
+      if (localStream) {
+        localStream.getTracks().forEach((t) => t.stop())
+      }
+    }
+  }, [])
+
+  // Robustly release a MediaStream: stop tracks, detach from any <video> elements, pause and unload elements
+  const releaseStream = useCallback((s: MediaStream | null) => {
+    if (!s) return
+    try {
+      // stop all tracks
+      s.getTracks().forEach((t) => {
+        try {
+          t.stop()
+        } catch (e) {
+          /* ignore */
+        }
+      })
+    } catch (e) {
+      /* ignore */
+    }
+
+    try {
+      // Detach from any video elements that reference this stream
+      const vids = Array.from(document.querySelectorAll("video")) as HTMLVideoElement[]
+      vids.forEach((v) => {
+        try {
+          if ((v.srcObject as MediaStream | null) === s) {
+            v.pause()
+            try {
+              v.srcObject = null
+            } catch (e) {
+              // fallback to clearing src
+              v.src = ""
+            }
+            // try to force unload
+            try {
+              v.removeAttribute("src")
+              v.load()
+            } catch (e) {
+              /* ignore */
+            }
+          }
+        } catch (e) {
+          /* ignore */
+        }
+      })
+    } catch (e) {
+      /* ignore */
+    }
+
+    // Clear ref if it matches
+    if (streamRef.current === s) streamRef.current = null
+    if (stream === s) setStream(null)
+  }, [])
+
+  // Try to auto-start camera on mount (desktop browsers). Mobile browsers may require a user gesture.
+  useEffect(() => {
+    // best-effort auto-start; on iOS this will typically fail silently until user interacts
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    startCamera()
+
+    return () => {
+      const active = streamRef.current ?? (videoRef.current?.srcObject as MediaStream | null)
+      try {
+        releaseStream(active)
+      } catch (e) {
+        /* ignore */
+      }
+      // ensure video element is cleaned
+      if (videoRef.current) {
+        try {
+          videoRef.current.pause()
+          videoRef.current.removeAttribute("src")
+          ;(videoRef.current as HTMLVideoElement).srcObject = null
+          try {
+            videoRef.current.load()
+          } catch (e) {
+            /* ignore */
+          }
+        } catch (e) {
+          /* ignore */
+        }
+      }
+      setStream(null)
+    }
+    // intentionally excluding startCamera from deps to avoid re-creating stream
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const formatTime = useCallback((seconds: number) => {
     const m = Math.floor(seconds / 60)
       .toString()
@@ -106,8 +243,52 @@ export function SessionView({ onStop }: { onStop: () => void }) {
     <div className="fixed inset-0 z-50 bg-foreground">
       {/* Full-screen camera feed */}
       <div className="absolute inset-0 bg-foreground/95 overflow-hidden">
-        {/* Simulated camera feed - dark background with grid overlay */}
+        {/* Camera feed (video) or simulated background when camera unavailable */}
         <div className="absolute inset-0">
+          {cameraError ? (
+            <div className="absolute inset-0 flex items-center justify-center bg-foreground">
+              <div className="text-center px-4">
+                <p className="text-sm font-medium text-destructive">Camera unavailable</p>
+                <p className="text-xs text-muted-foreground mt-2">{cameraError}</p>
+                <p className="text-xs text-muted-foreground mt-2">Please allow camera access or try a different browser.</p>
+                <div className="mt-3">
+                  <button
+                    className="px-4 py-2 rounded-md bg-primary text-primary-foreground text-sm"
+                    onClick={() => {
+                      // user gesture to re-request permissions
+                      void startCamera()
+                    }}
+                  >
+                    Enable Camera
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : !stream ? (
+            <div className="absolute inset-0 flex items-center justify-center bg-foreground">
+              <div className="text-center px-4">
+                <p className="text-sm font-medium text-muted-foreground">Camera is not active</p>
+                <div className="mt-3">
+                  <button
+                    className="px-4 py-2 rounded-md bg-primary text-primary-foreground text-sm"
+                    onClick={() => {
+                      void startCamera()
+                    }}
+                  >
+                    Enable Camera
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="absolute inset-0 w-full h-full object-cover bg-black"
+            />
+          )}
           <div
             className="absolute inset-0 opacity-10"
             style={{
@@ -193,7 +374,40 @@ export function SessionView({ onStop }: { onStop: () => void }) {
 
         {/* Stop button */}
         <button
-          onClick={onStop}
+          onClick={() => {
+              // stop any running timers
+              timeoutRefs.current.forEach(clearTimeout)
+              timeoutRefs.current = []
+
+              // prefer stopping the stream from the ref (most up-to-date)
+              const active = streamRef.current ?? stream
+              try {
+                releaseStream(active)
+              } catch (e) {
+                /* ignore */
+              }
+
+              // defensive cleanup on the video element
+              if (videoRef.current) {
+                try {
+                  videoRef.current.pause()
+                  videoRef.current.removeAttribute("src")
+                  ;(videoRef.current as HTMLVideoElement).srcObject = null
+                  try {
+                    videoRef.current.load()
+                  } catch (e) {
+                    /* ignore */
+                  }
+                } catch (e) {
+                  /* ignore */
+                }
+              }
+
+              streamRef.current = null
+              setStream(null)
+
+              onStop()
+            }}
           className="flex items-center gap-2 h-11 px-6 rounded-xl bg-destructive text-card font-medium text-sm hover:bg-destructive/90 transition-colors cursor-pointer"
         >
           <Square className="size-4" />
