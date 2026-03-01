@@ -11,3 +11,10 @@ node_modules/
 
 # Other files
 AGENTS.md
+backend/src/.env
+
+.env
+backend/.env
+frontend/.env
+node_modules
+.next
