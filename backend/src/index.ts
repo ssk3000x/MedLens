@@ -3,6 +3,8 @@ import { WebSocketServer, WebSocket as WSClient } from 'ws';
 import http from 'http';
 import dotenv from 'dotenv';
 import admin from 'firebase-admin';
+import fs from 'fs';
+import crypto from 'crypto';
 
 dotenv.config();
 
@@ -43,6 +45,9 @@ wss.on('connection', (ws: any) => {
   let isInterrupted = false;
   let geminiReady = false; // Guardrail to prevent sending data too early
   let geminiSocket: any = null; 
+  // store the most recent frame received so we can ensure it's included
+  // with user prompts (avoids triggering text-only responses)
+  let latestFrameBase64: string | null = null;
 
   const keepaliveTimer = setInterval(() => {
     if (ioWs.readyState === 1) {
@@ -77,19 +82,18 @@ wss.on('connection', (ws: any) => {
             
             const setupMessage = {
               setup: {
-                // Using the specific 2.5 model you identified
                 model: "models/gemini-2.5-flash-native-audio-preview-12-2025",
-                generation_config: {
-                  response_modalities: ["audio"],
-                  speech_config: {
-                    voice_config: {
-                      prebuilt_voice_config: {
-                        voice_name: "Aoede" 
+                generationConfig: {
+                  responseModalities: ["AUDIO"],
+                  speechConfig: {
+                    voiceConfig: {
+                      prebuiltVoiceConfig: {
+                        voiceName: "Aoede" 
                       }
                     }
                   }
                 },
-                system_instruction: {
+                systemInstruction: {
                   role: "system",
                   parts: [{ text: SYSTEM_PROMPT + "\n\n" + PROMPT_INJECTION_DEFENSE }]
                 }
@@ -129,11 +133,14 @@ wss.on('connection', (ws: any) => {
               if (response.serverContent?.modelTurn) {
                 const parts = response.serverContent.modelTurn.parts;
                 for (const part of parts) {
-                  if (part.inlineData && ioWs.readyState === 1 && !isInterrupted) {
-                    ws.send(JSON.stringify({
-                      type: 'agent_speech_chunk',
-                      data: part.inlineData.data 
-                    }));
+                  // audio chunks (binary/base64) forwarded as before
+                  if (part.inlineData && part.inlineData.data && ioWs.readyState === 1 && !isInterrupted) {
+                    ws.send(JSON.stringify({ type: 'agent_speech_chunk', data: part.inlineData.data }));
+                  }
+
+                  // also forward any textual content
+                  if (part.text && ioWs.readyState === 1 && !isInterrupted) {
+                    ws.send(JSON.stringify({ type: 'agent_speech_text', text: part.text }));
                   }
                 }
               }
@@ -164,12 +171,20 @@ wss.on('connection', (ws: any) => {
             /* ignore logging errors */
           }
 
-          // DO NOT send frames until geminiReady is true
+          // Always keep the most recent frame buffered locally so we can
+          // include it when the user explicitly asks the agent to describe
+          // the image. Only forward frames to Gemini when it's ready.
+          try {
+            latestFrameBase64 = data.data;
+          } catch (e) {
+            /* ignore assignment errors */
+          }
+
           if (geminiSocket?.readyState === 1 && geminiReady && !isInterrupted) {
             const frameMsg = {
-               realtime_input: {
-                 media_chunks: [{
-                   mime_type: "image/jpeg",
+               realtimeInput: {
+                 mediaChunks: [{
+                   mimeType: "image/jpeg",
                    data: data.data
                  }]
                }
@@ -181,16 +196,101 @@ wss.on('connection', (ws: any) => {
               console.warn('Failed to forward frame to Gemini:', e);
             }
           } else {
-            console.log('⏸️ Frame received but not forwarded (Gemini not ready or interrupted)');
+            console.log('⏸️ Frame received and buffered but not forwarded (Gemini not ready or interrupted)');
+          }
+          break;
+
+        case 'user_prompt':
+          // Forward a user text prompt to Gemini to trigger a descriptive response
+          try {
+            const prompt = String(data.text || 'Describe the most recent image and any medications you see. Keep the answer under 3 sentences.');
+
+            if (geminiSocket?.readyState === 1 && geminiReady && !isInterrupted) {
+              // If we have a recent frame buffered, send it immediately first
+              // so the model has visual context for the upcoming user prompt.
+              if (latestFrameBase64) {
+                try {
+                  const frameBuf = Buffer.from(latestFrameBase64, 'base64');
+                  const md5 = crypto.createHash('md5').update(frameBuf).digest('hex');
+                  const tmpPath = `/tmp/medlens-frame-${currentSessionId || 'anon'}.jpg`;
+                  try {
+                    fs.writeFileSync(tmpPath, frameBuf);
+                    console.log(`💾 Wrote buffered frame to ${tmpPath} (size=${frameBuf.length} bytes, md5=${md5})`);
+                  } catch (e) {
+                    console.warn('Could not write buffered frame to disk:', e);
+                  }
+
+                  // Send the buffered frame multiple times quickly to increase
+                  // the chance Gemini ingests the correct visual context.
+                  const preFrameMsg = {
+                    realtimeInput: {
+                      mediaChunks: [{ mimeType: 'image/jpeg', data: latestFrameBase64 }]
+                    }
+                  };
+
+                  for (let i = 0; i < 3; i++) {
+                    setTimeout(() => {
+                      try {
+                        geminiSocket.send(JSON.stringify(preFrameMsg));
+                        console.log(`📤 Forwarded buffered frame #${i + 1} to Gemini (md5=${md5})`);
+                      } catch (e) {
+                        console.warn('Failed to forward buffered frame to Gemini:', e);
+                      }
+                    }, i * 120);
+                  }
+                } catch (e) {
+                  console.warn('Failed to process buffered frame before prompt:', e);
+                }
+              }
+
+              // Build clientContent message; if we have the latest frame,
+              // attach it inline in the same user turn so Gemini must use it
+              // when answering.
+              const userParts: any[] = [{ text: prompt }];
+              if (latestFrameBase64) {
+                userParts.push({ inlineData: { mimeType: 'image/jpeg', data: latestFrameBase64 } });
+              }
+
+              const textMsg = {
+                clientContent: {
+                  turnComplete: true,
+                  turns: [{
+                    role: 'user',
+                    parts: userParts
+                  }]
+                }
+              };
+
+              // Give the model a short moment to ingest the image before
+              // sending the user's text prompt. This reduces the chance the
+              // model responds from a previous visual context.
+              try {
+                console.log('📨 Scheduling prompt to Gemini after frame pre-send:', prompt);
+                setTimeout(() => {
+                  try {
+                    geminiSocket.send(JSON.stringify(textMsg));
+                    console.log('✉️ Forwarded user prompt to Gemini');
+                  } catch (e) {
+                    console.warn('Failed to forward prompt to Gemini, will fallback locally', e);
+                  }
+                }, 250);
+              } catch (e) {
+                console.warn('Failed to schedule prompt send:', e);
+              }
+            } else {
+              console.log('⚠️ Cannot forward user prompt - Gemini not ready');
+            }
+          } catch (e) {
+            console.error('Error forwarding user prompt:', e);
           }
           break;
 
         case 'audio_chunk':
           if (geminiSocket?.readyState === 1 && geminiReady && !isInterrupted) {
             const audioMsg = {
-               realtime_input: {
-                 media_chunks: [{
-                   mime_type: "audio/pcm;rate=16000",
+               realtimeInput: {
+                 mediaChunks: [{
+                   mimeType: "audio/pcm;rate=16000",
                    data: data.data
                  }]
                }
@@ -203,8 +303,8 @@ wss.on('connection', (ws: any) => {
           console.log(`🛑 User Interrupt received`);
           isInterrupted = true;
           if (geminiSocket && geminiSocket.readyState === 1) {
-            // Signal interrupt to Gemini
-            geminiSocket.send(JSON.stringify({ realtime_input: { media_chunks: [] } }));
+            // Signal interrupt to Gemini using clear/interrupt semantics
+            geminiSocket.send(JSON.stringify({ clientContent: { turnComplete: true, turns: [] } }));
           }
           ws.send(JSON.stringify({ type: 'agent_speech_end' }));
           setTimeout(() => { isInterrupted = false; }, 500); // Small cooldown

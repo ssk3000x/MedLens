@@ -66,7 +66,15 @@ export function SessionView({ onStop }: { onStop: () => void }) {
   const timeoutRefs = useRef<NodeJS.Timeout[]>([])
   const videoRef = useRef<HTMLVideoElement | null>(null)
 
-  const { connect, disconnect } = useLiveAgent()
+  const { connect, disconnect, sendPrompt } = useLiveAgent((msg) => {
+    setCurrentMessage((prev) => {
+      // Append text, assuming parts come in chunks
+      // Optionally just replace it if you want only the latest chunk
+      if (prev === "Analyzing image...") return msg
+      return prev + " " + msg
+    })
+    setIsListening(true)
+  })
 
   // Session timer
   useEffect(() => {
@@ -76,26 +84,12 @@ export function SessionView({ onStop }: { onStop: () => void }) {
     return () => clearInterval(interval)
   }, [])
 
-  // Simulated detection pipeline
+  // Start with listening text instead of launching simulated delays
   useEffect(() => {
-    SIMULATED_DETECTIONS.forEach((det) => {
-      const timeout = setTimeout(() => {
-        setDetections((prev) => [...prev, det])
-      }, det.delay)
-      timeoutRefs.current.push(timeout)
-    })
-
-    ARIA_MESSAGES.forEach((msg) => {
-      const timeout = setTimeout(() => {
-        setCurrentMessage(msg.text)
-      }, msg.delay)
-      timeoutRefs.current.push(timeout)
-    })
-
-    // Toggle "listening" state
-    const listenTimeout = setTimeout(() => setIsListening(true), 11000)
-    timeoutRefs.current.push(listenTimeout)
-
+    // Only set initial message
+    setCurrentMessage("Connected. Waiting for your prompt...")
+    setIsListening(true)
+    
     return () => {
       timeoutRefs.current.forEach(clearTimeout)
     }
@@ -376,6 +370,27 @@ export function SessionView({ onStop }: { onStop: () => void }) {
           <p className="text-xs text-center text-background/80 max-w-sm leading-relaxed">
             {currentMessage || "Initializing camera and voice..."}
           </p>
+        </div>
+
+        {/* Request button */}
+        <div className="mb-2">
+          <button
+            onClick={() => {
+              try {
+                // Change UI status
+                setCurrentMessage("Analyzing image...");
+                setIsListening(false);
+                sendPrompt?.(
+                  'Please describe the most recent image and list any medications visible. Keep it under 3 sentences.'
+                )
+              } catch (e) {
+                /* ignore */
+              }
+            }}
+            className="mb-2 flex items-center gap-2 h-10 px-4 rounded-lg bg-primary/90 text-primary-foreground text-sm font-medium hover:bg-primary/80 transition-colors"
+          >
+            Ask Agent to Describe Image
+          </button>
         </div>
 
         {/* Stop button */}
