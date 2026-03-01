@@ -1,3 +1,11 @@
+TO RUN FRONTEND:
+cd frontend
+npm run dev
+
+TO RUN BACKEND:
+cd backend
+npx ts-node src/index.ts
+
 # MedLens — Live Multimodal Medication Safety Agent
 
 MedLens is a desktop-first, zero-install web app prototype that demonstrates a live, multimodal medication-safety agent. Users hold a medication bottle up to their webcam, speak naturally, and receive an interruptible, grounded safety check that can draft emails to clinicians.

@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef } from "react"
 import { Square, AlertTriangle } from "lucide-react"
+import { useLiveAgent } from "@/hooks/use-live-agent"
 
 const SIMULATED_DETECTIONS = [
   {
@@ -64,6 +65,8 @@ export function SessionView({ onStop }: { onStop: () => void }) {
   const [sessionTime, setSessionTime] = useState(0)
   const timeoutRefs = useRef<NodeJS.Timeout[]>([])
   const videoRef = useRef<HTMLVideoElement | null>(null)
+
+  const { connect, disconnect } = useLiveAgent()
 
   // Session timer
   useEffect(() => {
@@ -130,8 +133,11 @@ export function SessionView({ onStop }: { onStop: () => void }) {
       if (videoRef.current) {
         try {
           videoRef.current.srcObject = localStream
+          // Connect to the backend when starting the camera
+          connect(videoRef.current)
         } catch (e) {
           // ignore assignment errors in some environments
+          connect()
         }
       }
     } catch (err: any) {
@@ -405,6 +411,7 @@ export function SessionView({ onStop }: { onStop: () => void }) {
 
               streamRef.current = null
               setStream(null)
+              disconnect()
 
               onStop()
             }}
