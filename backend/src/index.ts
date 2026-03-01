@@ -107,6 +107,21 @@ wss.on('connection', (ws: any) => {
               if (response.setupComplete) {
                 console.log('✅ Gemini Setup Complete');
                 geminiReady = true;
+
+                // Emit a short mock speech event so the frontend can validate audio plumbing
+                try {
+                  console.log('🔊 Emitting mock agent speech');
+                  if (ioWs && ioWs.readyState === 1) {
+                    // send a fake audio chunk (base64 placeholder) and then end
+                    ioWs.send(JSON.stringify({ type: 'agent_speech_chunk', data: 'dGVzdC1hdWRpby1jaHVuay' }));
+                    setTimeout(() => {
+                      try { ioWs.send(JSON.stringify({ type: 'agent_speech_end' })); } catch (e) { /* ignore */ }
+                    }, 500);
+                  }
+                } catch (err) {
+                  console.warn('Failed to emit mock speech:', err);
+                }
+
                 return;
               }
 
@@ -142,6 +157,13 @@ wss.on('connection', (ws: any) => {
           break;
 
         case 'frame':
+          // Log receipt and whether we'll forward frames to Gemini
+          try {
+            console.log(`📷 Received frame for session ${currentSessionId} - geminiReady=${geminiReady}, geminiSocketReady=${geminiSocket?.readyState}`);
+          } catch (e) {
+            /* ignore logging errors */
+          }
+
           // DO NOT send frames until geminiReady is true
           if (geminiSocket?.readyState === 1 && geminiReady && !isInterrupted) {
             const frameMsg = {
@@ -152,7 +174,14 @@ wss.on('connection', (ws: any) => {
                  }]
                }
             };
-            geminiSocket.send(JSON.stringify(frameMsg));
+            try {
+              geminiSocket.send(JSON.stringify(frameMsg));
+              console.log('📤 Forwarded frame to Gemini');
+            } catch (e) {
+              console.warn('Failed to forward frame to Gemini:', e);
+            }
+          } else {
+            console.log('⏸️ Frame received but not forwarded (Gemini not ready or interrupted)');
           }
           break;
 
