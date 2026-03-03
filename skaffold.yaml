@@ -1,0 +1,10 @@
+apiVersion: skaffold/v4beta6
+kind: Config
+metadata:
+  name: medlens
+build:
+  artifacts:
+    - image: medlens-backend
+      context: backend
+      docker:
+        dockerfile: Dockerfile

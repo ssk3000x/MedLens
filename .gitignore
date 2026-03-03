@@ -18,3 +18,8 @@ backend/.env
 frontend/.env
 node_modules
 .next
+
+service-account.json
+*-service-account.json
+firebase-key.json
+

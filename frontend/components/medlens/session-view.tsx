@@ -4,59 +4,7 @@ import { useEffect, useState, useCallback, useRef } from "react"
 import { Square, AlertTriangle } from "lucide-react"
 import { useLiveAgent } from "@/hooks/use-live-agent"
 
-const SIMULATED_DETECTIONS = [
-  {
-    id: 1,
-    label: "Metformin 500mg",
-    confidence: 0.96,
-    position: { top: "22%", left: "15%", width: "35%", height: "14%" },
-    delay: 2000,
-  },
-  {
-    id: 2,
-    label: "Lisinopril 10mg",
-    confidence: 0.92,
-    position: { top: "48%", left: "50%", width: "30%", height: "12%" },
-    delay: 4500,
-  },
-  {
-    id: 3,
-    label: "Atorvastatin 20mg",
-    confidence: 0.89,
-    position: { top: "70%", left: "20%", width: "32%", height: "13%" },
-    delay: 7000,
-  },
-]
-
-const ARIA_MESSAGES = [
-  {
-    text: "I can see your medications. Let me take a closer look...",
-    delay: 1500,
-  },
-  {
-    text: "I've identified Metformin 500mg. This is commonly used for type 2 diabetes management.",
-    delay: 3500,
-  },
-  {
-    text: "Now I see Lisinopril 10mg - an ACE inhibitor for blood pressure. No interaction with Metformin detected.",
-    delay: 6000,
-  },
-  {
-    text: "Atorvastatin 20mg detected. Checking interactions... All three medications are safe to take together based on your profile.",
-    delay: 8500,
-  },
-]
-
-interface Detection {
-  id: number
-  label: string
-  confidence: number
-  position: { top: string; left: string; width: string; height: string }
-  delay: number
-}
-
 export function SessionView({ onStop }: { onStop: (summary?: any) => void }) {
-  const [detections, setDetections] = useState<Detection[]>([])
   const [currentMessage, setCurrentMessage] = useState("")
   const [transcript, setTranscript] = useState<{ speaker: 'user' | 'agent'; text: string }[]>([])
   const [isListening, setIsListening] = useState(false)
@@ -64,509 +12,95 @@ export function SessionView({ onStop }: { onStop: (summary?: any) => void }) {
   const streamRef = useRef<MediaStream | null>(null)
   const [cameraError, setCameraError] = useState<string | null>(null)
   const [sessionTime, setSessionTime] = useState(0)
-  const timeoutRefs = useRef<NodeJS.Timeout[]>([])
   const videoRef = useRef<HTMLVideoElement | null>(null)
 
-  const { connect, disconnect, sendPrompt, startMicrophone, stopMicrophone } = useLiveAgent((msg) => {
-    setCurrentMessage((prev) => {
-      if (prev === "Analyzing image...") return msg
-      return prev + " " + msg
-    })
-    setTranscript((prev) => {
-      // append agent utterance with role label; keep transcript bounded
-      const next = [...prev, { speaker: 'agent' as const, text: msg }]
-      if (next.length > 400) return next.slice(next.length - 400)
-      return next
-    })
+  // FIX: Wrap the callback so it doesn't cause an infinite loop
+  const handleAgentMessage = useCallback((msg: string) => {
+    setCurrentMessage((prev) => (prev === "Analyzing..." ? msg : prev + " " + msg))
+    setTranscript((prev) => [...prev, { speaker: 'agent', text: msg }])
     setIsListening(true)
-  })
-
-  const recognitionRef = useRef<any>(null)
-  const startSpeechRecognition = useCallback(() => {
-    const SpeechRecognition = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition
-    if (!SpeechRecognition) return
-    try {
-      const rec = new SpeechRecognition()
-      rec.continuous = true
-      rec.interimResults = false
-      rec.lang = 'en-US'
-
-      rec.onresult = (ev: any) => {
-        try {
-          for (let i = ev.resultIndex; i < ev.results.length; i++) {
-            const r = ev.results[i]
-            if (r.isFinal) {
-              const text = r[0]?.transcript?.trim()
-              if (text) {
-                setTranscript((prev) => {
-                  const next = [...prev, { speaker: 'user' as const, text }]
-                  if (next.length > 400) return next.slice(next.length - 400)
-                  return next
-                })
-              }
-            }
-          }
-        } catch (e) {
-          /* ignore */
-        }
-      }
-
-      rec.onerror = () => {
-        // ignore errors silently
-      }
-
-      rec.start()
-      recognitionRef.current = rec
-    } catch (e) {
-      // ignore
-    }
   }, [])
 
-  const stopSpeechRecognition = useCallback(() => {
-    try {
-      const r = recognitionRef.current
-      if (r && typeof r.stop === 'function') {
-        try { r.stop() } catch (e) {}
-      }
-      recognitionRef.current = null
-    } catch (e) {
-      /* ignore */
-    }
-  }, [])
+  const { connect, disconnect, sendPrompt, startMicrophone } = useLiveAgent(handleAgentMessage)
 
-  // Start with listening text instead of launching simulated delays
-  useEffect(() => {
-    // Only set initial message
-    setCurrentMessage("Connected. Waiting for your prompt...")
-    setIsListening(true)
-    
-    return () => {
-      timeoutRefs.current.forEach(clearTimeout)
-    }
-  }, [])
-
-  // Camera start handler (callable from a user gesture on mobile)
   const startCamera = useCallback(async () => {
-    let localStream: MediaStream | null = null
     try {
-      const constraints = {
-        video: {
-          facingMode: { ideal: "environment" },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-        },
-        // Ask for microphone permission so we can stream to the live agent
-        audio: true,
+      // Clear old streams if they exist
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(t => t.stop())
       }
 
-      if (navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === "function") {
-        localStream = await navigator.mediaDevices.getUserMedia(constraints)
-      } else {
-        // legacy fallback for older WebKit builds on iOS
-        const legacyGetUserMedia = (navigator as any).getUserMedia || (navigator as any).webkitGetUserMedia || (navigator as any).mozGetUserMedia
-        if (!legacyGetUserMedia) {
-          throw new Error("getUserMedia is not supported in this browser. Try Safari or update iOS and use HTTPS.")
-        }
-        localStream = await new Promise<MediaStream>((resolve, reject) => {
-          legacyGetUserMedia.call(navigator, constraints, resolve, reject)
-        })
-      }
+      const localStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment", width: 640, height: 480 },
+        audio: true,
+      })
 
       setStream(localStream)
       streamRef.current = localStream
-      setCameraError(null)
+      
       if (videoRef.current) {
-        try {
-          videoRef.current.srcObject = localStream
-          // Connect to the backend when starting the camera
-          connect(videoRef.current)
-          // Start microphone capture and streaming (best-effort). If the
-          // provided stream includes audio, pass it to the hook to avoid
-          // re-requesting permissions.
-          try {
-            startMicrophone?.(localStream)
-            // start client-side speech recognition (best-effort) to capture
-            // user utterances for a labeled transcript
-            try { startSpeechRecognition() } catch (e) { /* ignore */ }
-          } catch (e) {
-            /* ignore */
-          }
-        } catch (e) {
-          // ignore assignment errors in some environments
-          connect()
-        }
+        videoRef.current.srcObject = localStream
+        connect(videoRef.current)
+        startMicrophone(localStream)
       }
     } catch (err: any) {
-      // Improve message when getUserMedia is not available vs permission denied
-      const msg = err?.message || String(err) || "Camera permission denied or not available"
-      setCameraError(msg)
+      console.error("Camera Error:", err)
+      setCameraError(err.message || "Camera access denied")
     }
+  }, [connect, startMicrophone])
 
-    return () => {
-      if (localStream) {
-        localStream.getTracks().forEach((t) => t.stop())
-      }
-    }
-  }, [])
-
-  // Robustly release a MediaStream: stop tracks, detach from any <video> elements, pause and unload elements
-  const releaseStream = useCallback((s: MediaStream | null) => {
-    if (!s) return
-    try {
-      // stop all tracks
-      s.getTracks().forEach((t) => {
-        try {
-          t.stop()
-        } catch (e) {
-          /* ignore */
-        }
-      })
-    } catch (e) {
-      /* ignore */
-    }
-
-    try {
-      // Detach from any video elements that reference this stream
-      const vids = Array.from(document.querySelectorAll("video")) as HTMLVideoElement[]
-      vids.forEach((v) => {
-        try {
-          if ((v.srcObject as MediaStream | null) === s) {
-            v.pause()
-            try {
-              v.srcObject = null
-            } catch (e) {
-              // fallback to clearing src
-              v.src = ""
-            }
-            // try to force unload
-            try {
-              v.removeAttribute("src")
-              v.load()
-            } catch (e) {
-              /* ignore */
-            }
-          }
-        } catch (e) {
-          /* ignore */
-        }
-      })
-    } catch (e) {
-      /* ignore */
-    }
-
-    // Clear ref if it matches
-    if (streamRef.current === s) streamRef.current = null
-    if (stream === s) setStream(null)
-  }, [])
-
-  // Try to auto-start camera on mount (desktop browsers). Mobile browsers may require a user gesture.
   useEffect(() => {
-    // best-effort auto-start; on iOS this will typically fail silently until user interacts
-    // eslint-disable-next-line @typescript-eslint/no-floating-promises
     startCamera()
-
+    const timer = setInterval(() => setSessionTime(p => p + 1), 1000)
     return () => {
-      const active = streamRef.current ?? (videoRef.current?.srcObject as MediaStream | null)
-      try {
-        releaseStream(active)
-      } catch (e) {
-        /* ignore */
-      }
-      try { stopMicrophone?.() } catch (e) { /* ignore */ }
-      try { stopSpeechRecognition() } catch (e) { /* ignore */ }
-      // ensure video element is cleaned
-      if (videoRef.current) {
-        try {
-          videoRef.current.pause()
-          videoRef.current.removeAttribute("src")
-          ;(videoRef.current as HTMLVideoElement).srcObject = null
-          try {
-            videoRef.current.load()
-          } catch (e) {
-            /* ignore */
-          }
-        } catch (e) {
-          /* ignore */
-        }
-      }
-      setStream(null)
+      clearInterval(timer)
+      disconnect()
     }
-    // intentionally excluding startCamera from deps to avoid re-creating stream
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [startCamera, disconnect])
 
-  const formatTime = useCallback((seconds: number) => {
-    const m = Math.floor(seconds / 60)
-      .toString()
-      .padStart(2, "0")
-    const s = (seconds % 60).toString().padStart(2, "0")
-    return `${m}:${s}`
-  }, [])
-
-  // Simple client-side summarizer: pick a few representative sentences
-  const generateSummary = useCallback(() => {
-    const joined = transcript.map((t) => `${t.speaker === 'user' ? 'User' : 'Agent'}: ${t.text}`).join(' ').trim() || currentMessage || ''
-    const sentences = joined.split(/(?<=[.!?])\s+/).filter(Boolean)
-    // pick up to 3 short sentences
-    const picked: string[] = []
-    for (const s of sentences) {
-      if (picked.length >= 3) break
-      const trimmed = s.trim()
-      if (trimmed.length === 0) continue
-      picked.push(trimmed)
-    }
-
-    const medications = detections.length > 0
-      ? detections.map((d) => ({ name: d.label }))
-      : // attempt to extract tokens like 'Name 10mg' from joined text
-        Array.from(new Set((joined.match(/([A-Z][a-z]+\s?\d+mg)/g) || []))).map((s) => ({ name: s }))
-
-    const summaryText = picked.length > 0 ? picked.join(' ') : (joined.slice(0, 280) || 'No summary available.')
-
-    const summary = {
-      summaryText,
-      medications,
-      transcript,
-      endedAt: Date.now(),
-    }
-    return summary
-  }, [transcript, currentMessage, detections])
+  const formatTime = (s: number) => `${Math.floor(s / 60).toString().padStart(2, "0")}:${(s % 60).toString().padStart(2, "0")}`
 
   return (
-    <div className="fixed inset-0 z-50 bg-foreground">
-      {/* Full-screen camera feed */}
-      <div className="absolute inset-0 bg-foreground/95 overflow-hidden">
-        {/* Camera feed (video) or simulated background when camera unavailable */}
-        <div className="absolute inset-0">
-          {cameraError ? (
-            <div className="absolute inset-0 flex items-center justify-center bg-foreground">
-              <div className="text-center px-4">
-                <p className="text-sm font-medium text-destructive">Camera unavailable</p>
-                <p className="text-xs text-muted-foreground mt-2">{cameraError}</p>
-                <p className="text-xs text-muted-foreground mt-2">Please allow camera access or try a different browser.</p>
-                <div className="mt-3">
-                  <button
-                    className="px-4 py-2 rounded-md bg-primary text-primary-foreground text-sm"
-                    onClick={() => {
-                      // user gesture to re-request permissions
-                      void startCamera()
-                    }}
-                  >
-                    Enable Camera
-                  </button>
-                </div>
-              </div>
-            </div>
-          ) : !stream ? (
-            <div className="absolute inset-0 flex items-center justify-center bg-foreground">
-              <div className="text-center px-4">
-                <p className="text-sm font-medium text-muted-foreground">Camera is not active</p>
-                <div className="mt-3">
-                  <button
-                    className="px-4 py-2 rounded-md bg-primary text-primary-foreground text-sm"
-                    onClick={() => {
-                      void startCamera()
-                    }}
-                  >
-                    Enable Camera
-                  </button>
-                </div>
-              </div>
-            </div>
-          ) : (
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              className="absolute inset-0 w-full h-full object-cover bg-black"
-            />
-          )}
-          <div
-            className="absolute inset-0 opacity-10"
-            style={{
-              backgroundImage:
-                "linear-gradient(rgba(255,255,255,.06) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.06) 1px, transparent 1px)",
-              backgroundSize: "40px 40px",
-            }}
-          />
-          {/* Viewfinder corners */}
-          <div className="absolute top-16 left-6 w-10 h-10 border-t-2 border-l-2 border-primary/60 rounded-tl-lg" />
-          <div className="absolute top-16 right-6 w-10 h-10 border-t-2 border-r-2 border-primary/60 rounded-tr-lg" />
-          <div className="absolute bottom-6 left-6 w-10 h-10 border-b-2 border-l-2 border-primary/60 rounded-bl-lg" />
-          <div className="absolute bottom-6 right-6 w-10 h-10 border-b-2 border-r-2 border-primary/60 rounded-br-lg" />
+    <div className="fixed inset-0 z-50 bg-black">
+      {cameraError ? (
+        <div className="flex items-center justify-center h-full text-white">{cameraError}</div>
+      ) : (
+        <video ref={videoRef} autoPlay playsInline muted className="absolute inset-0 w-full h-full object-cover" />
+      )}
+      
+      <div className="absolute top-0 left-0 right-0 p-4 flex flex-col items-center">
+        <div className="bg-yellow-500 text-black px-4 py-1 rounded text-xs font-bold flex items-center gap-2">
+          <AlertTriangle size={14} /> AI ASSISTANT: NOT A DOCTOR
         </div>
-
-        {/* HUD Overlays - detected medications */}
-        {detections.map((det) => (
-          <div
-            key={det.id}
-            className="absolute animate-in fade-in zoom-in-95 duration-500"
-            style={{
-              top: det.position.top,
-              left: det.position.left,
-              width: det.position.width,
-              height: det.position.height,
-            }}
-          >
-            <div className="relative w-full h-full border-2 border-primary/70 rounded-lg">
-              <div className="absolute -top-7 left-0 flex items-center gap-2 px-2.5 py-1 rounded-md bg-primary/90 text-primary-foreground text-xs font-medium whitespace-nowrap">
-                {det.label}
-                <span className="text-primary-foreground/70">
-                  {Math.round(det.confidence * 100)}%
-                </span>
-              </div>
-              {/* Scanning line animation */}
-              <div className="absolute inset-0 overflow-hidden rounded-lg">
-                <div className="absolute w-full h-0.5 bg-primary/40 animate-pulse top-1/2" />
-              </div>
-            </div>
-          </div>
-        ))}
-      </div>
-
-      {/* Top HUD bar - overlaid on camera */}
-      <div className="absolute top-0 left-0 right-0 z-10">
-        {/* Disclaimer banner */}
-        <div className="flex items-center justify-center gap-2 px-4 py-2 bg-warning/90 text-warning-foreground text-xs font-medium">
-          <AlertTriangle className="size-3.5" />
-          <span>
-            I am an AI, not a doctor. In an emergency, call 911.
-          </span>
-        </div>
-
-        <div className="flex items-center justify-between px-4 pt-3">
-          {/* Detection count */}
-          <div className="px-3 py-1.5 rounded-full bg-background/10 backdrop-blur-md">
-            <span className="text-xs text-background/90">
-              {detections.length} detected
-            </span>
-          </div>
-
-          {/* Session timer */}
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-background/10 backdrop-blur-md">
-            <div className="size-2 rounded-full bg-destructive animate-pulse" />
-            <span className="text-xs font-mono text-background/90">
-              {formatTime(sessionTime)}
-            </span>
-          </div>
+        <div className="mt-4 text-white font-mono text-xl bg-black/40 px-3 py-1 rounded-full">
+          {formatTime(sessionTime)}
         </div>
       </div>
 
-      {/* Bottom controls - floating over camera, no background panel */}
-      <div className="absolute bottom-0 left-0 right-0 z-10 flex flex-col items-center gap-2.5 px-6 pb-8 pt-16 bg-gradient-to-t from-black/70 via-black/30 to-transparent">
-        {/* Aria waveform */}
-        <AriaWaveform isListening={isListening} />
-
-        {/* Current message */}
-        <div className="min-h-[36px] flex items-center">
-          <p className="text-xs text-center text-background/80 max-w-sm leading-relaxed">
-            {currentMessage || "Initializing camera and voice..."}
-          </p>
+      <div className="absolute bottom-10 left-0 right-0 flex flex-col items-center gap-6 px-6">
+        <div className="text-white text-center text-sm max-w-md bg-black/50 p-4 rounded-xl backdrop-blur-md min-h-[60px]">
+          {currentMessage || "Connecting to Aria..."}
         </div>
 
-        {/* Request button */}
-        <div className="mb-2">
-          <button
+        <div className="flex gap-4">
+          <button 
             onClick={() => {
-              try {
-                // Change UI status
-                setCurrentMessage("Analyzing image...");
-                setIsListening(false);
-                sendPrompt?.(
-                  'Please describe the most recent image and list any medications visible. Keep it under 3 sentences.'
-                )
-              } catch (e) {
-                /* ignore */
-              }
+              setCurrentMessage("Analyzing...")
+              sendPrompt("Describe what you see and check for medications.")
             }}
-            className="mb-2 flex items-center gap-2 h-10 px-4 rounded-lg bg-primary/90 text-primary-foreground text-sm font-medium hover:bg-primary/80 transition-colors"
+            className="bg-blue-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-blue-500"
           >
-            Ask Agent to Describe Image
+            Identify Medication
+          </button>
+          
+          <button 
+            onClick={() => onStop()} 
+            className="bg-red-600 text-white px-6 py-3 rounded-xl font-bold flex items-center gap-2 hover:bg-red-500"
+          >
+            <Square size={18} /> Stop
           </button>
         </div>
-
-        {/* Stop button */}
-        <button
-            onClick={() => {
-              // stop any running timers
-              timeoutRefs.current.forEach(clearTimeout)
-              timeoutRefs.current = []
-
-              // prefer stopping the stream from the ref (most up-to-date)
-              const active = streamRef.current ?? stream
-              try {
-                releaseStream(active)
-              } catch (e) {
-                /* ignore */
-              }
-
-              // defensive cleanup on the video element
-              if (videoRef.current) {
-                try {
-                  videoRef.current.pause()
-                  videoRef.current.removeAttribute("src")
-                  ;(videoRef.current as HTMLVideoElement).srcObject = null
-                  try {
-                    videoRef.current.load()
-                  } catch (e) {
-                    /* ignore */
-                  }
-                } catch (e) {
-                  /* ignore */
-                }
-              }
-
-              streamRef.current = null
-              setStream(null)
-              // stop microphone streaming if active
-              try { stopMicrophone?.() } catch (e) { /* ignore */ }
-              disconnect()
-
-              // generate a concise summary and pass it upstream
-              try {
-                const summary = generateSummary()
-                onStop?.(summary)
-              } catch (e) {
-                onStop()
-              }
-            }}
-          className="flex items-center gap-2 h-11 px-6 rounded-xl bg-destructive text-card font-medium text-sm hover:bg-destructive/90 transition-colors cursor-pointer"
-        >
-          <Square className="size-4" />
-          Stop Session
-        </button>
       </div>
-    </div>
-  )
-}
-
-function AriaWaveform({ isListening }: { isListening: boolean }) {
-  return (
-    <div className="flex items-center gap-1" aria-label={isListening ? "Listening" : "Speaking"}>
-      {Array.from({ length: 5 }).map((_, i) => (
-        <div
-          key={i}
-          className="w-1 rounded-full bg-primary transition-all duration-300"
-          style={{
-            height: isListening ? "8px" : `${12 + Math.sin(i * 1.2) * 10}px`,
-            animationName: isListening ? "none" : "waveform",
-            animationDuration: `${0.6 + i * 0.1}s`,
-            animationIterationCount: "infinite",
-            animationDirection: "alternate",
-            animationTimingFunction: "ease-in-out",
-          }}
-        />
-      ))}
-      <span className="ml-2 text-xs text-background/70 font-medium">
-        {isListening ? "Listening..." : "Aria"}
-      </span>
-      <style>{`
-        @keyframes waveform {
-          from { height: 6px; }
-          to { height: 24px; }
-        }
-      `}</style>
     </div>
   )
 }

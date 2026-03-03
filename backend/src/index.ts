@@ -14,16 +14,20 @@ app.use(bodyParser.json({ limit: '1mb' }));
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-// Firebase Admin Initialization
-try {
-  if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+// Safe Firebase Admin Initialization
+if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+  try {
+    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
     admin.initializeApp({
-      credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON || '{}'))
+      credential: admin.credential.cert(serviceAccount)
     });
     console.log('✅ Firebase Admin Initialized');
+  } catch (e) {
+    console.error('❌ Firebase Init Error:', e);
+    // Don't crash the whole server, just log the error
   }
-} catch (e) {
-  console.warn('Firebase init warning:', e);
+} else {
+  console.warn('⚠️ FIREBASE_SERVICE_ACCOUNT_JSON is missing. Firestore tools will not work.');
 }
 
 const SYSTEM_PROMPT = `You are MedLens, a real-time clinical AI assistant built for fast, conversational back-and-forth. You are NOT a doctor.
@@ -104,24 +108,28 @@ wss.on('connection', (ws: any) => {
             console.log('🤖 Connected to Gemini Live API');
             
             const setupMessage = {
-              setup: {
-                model: "models/gemini-2.5-flash-native-audio-preview-12-2025",
-                generationConfig: {
-                  responseModalities: ["AUDIO"],
-                  speechConfig: {
-                    voiceConfig: {
-                      prebuiltVoiceConfig: {
-                        voiceName: "Aoede" 
-                      }
-                    }
-                  }
-                },
-                systemInstruction: {
-                  role: "system",
-                  parts: [{ text: SYSTEM_PROMPT + "\n\n" + PROMPT_INJECTION_DEFENSE }]
-                }
-              }
-            };
+  setup: {
+    model: "models/gemini-2.5-flash-native-audio-preview-12-2025",
+    // 🛠️ THIS IS THE "PRO" ADDITION:
+    tools: [
+      { google_search_retrieval: {} } 
+    ],
+    generationConfig: {
+      responseModalities: ["AUDIO"],
+      speechConfig: {
+        voiceConfig: {
+          prebuiltVoiceConfig: {
+            voiceName: "Aoede" 
+          }
+        }
+      }
+    },
+    systemInstruction: {
+      role: "system",
+      parts: [{ text: SYSTEM_PROMPT + "\n\n" + PROMPT_INJECTION_DEFENSE }]
+    }
+  }
+};
             // SEND ONLY ONCE
             geminiSocket.send(JSON.stringify(setupMessage));
           });
@@ -345,9 +353,9 @@ wss.on('connection', (ws: any) => {
   });
 });
 
-const PORT = 8081;
+const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => {
-  console.log(`🚀 BACKEND ENGINE RUNNING: http://localhost:${PORT}`);
+  console.log(`🚀 BACKEND ENGINE RUNNING ON PORT ${PORT}`);
 });
 
 // Summarization endpoint: accepts { transcript: Array<{speaker,text}> }
