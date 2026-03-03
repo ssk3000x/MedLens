@@ -7,6 +7,12 @@ export function useLiveAgent(onMessage?: (msg: string) => void) {
   const audioCtxRef = useRef<AudioContext | null>(null);
   const nextAudioStartTimeRef = useRef<number>(0);
 
+  // Microphone capture refs
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const micAudioCtxRef = useRef<AudioContext | null>(null);
+  const micProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const micSequenceRef = useRef<number>(0);
+
   const startFrameStreaming = (videoElement: HTMLVideoElement) => {
     if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
     const canvas = document.createElement('canvas');
@@ -180,6 +186,97 @@ export function useLiveAgent(onMessage?: (msg: string) => void) {
     socketRef.current = socket;
   }, []);
 
+  // Convert Float32Array [-1,1] to 16-bit PCM little-endian
+  const floatTo16BitPCM = (float32Array: Float32Array) => {
+    const l = float32Array.length;
+    const buffer = new ArrayBuffer(l * 2);
+    const view = new DataView(buffer);
+    for (let i = 0; i < l; i++) {
+      let s = Math.max(-1, Math.min(1, float32Array[i]));
+      // scale to 16-bit signed int
+      view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    }
+    return new Uint8Array(buffer);
+  };
+
+  const arrayBufferToBase64 = (buffer: ArrayBuffer | Uint8Array) => {
+    const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+    const chunkSize = 0x8000; // avoid apply call size limits
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      const sub = bytes.subarray(i, i + chunkSize);
+      binary += String.fromCharCode.apply(null, Array.from(sub));
+    }
+    return btoa(binary);
+  };
+
+  // Start microphone capture and stream raw 16-bit PCM chunks (16kHz preferred)
+  const startMicrophone = useCallback(async (providedStream?: MediaStream) => {
+    try {
+      if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) {
+        console.warn('WebSocket not open — microphone will not stream until connected');
+      }
+
+      const stream = providedStream ?? (await navigator.mediaDevices.getUserMedia({ audio: true }));
+      micStreamRef.current = stream;
+
+      // Try to create AudioContext with 16000Hz; browsers may ignore but it's a best-effort
+      const AudioCtxClass = (window as any).AudioContext || (window as any).webkitAudioContext;
+      const audioCtx = new AudioCtxClass({ sampleRate: 16000 });
+      micAudioCtxRef.current = audioCtx;
+
+      const source = audioCtx.createMediaStreamSource(stream);
+
+      // ScriptProcessor buffer size 4096 is a reasonable compromise for latency
+      const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+      micProcessorRef.current = processor;
+
+      processor.onaudioprocess = (ev: AudioProcessingEvent) => {
+        try {
+          const input = ev.inputBuffer.getChannelData(0);
+          const pcm16 = floatTo16BitPCM(input);
+          const b64 = arrayBufferToBase64(pcm16.buffer);
+          micSequenceRef.current += 1;
+          if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+            socketRef.current.send(JSON.stringify({ type: 'audio_chunk', sequence: micSequenceRef.current, data: b64 }));
+          }
+        } catch (e) {
+          // ignore transient processing errors
+        }
+      };
+
+      source.connect(processor);
+      // Connect processor to destination to keep the node alive; do not boost output
+      try {
+        processor.connect(audioCtx.destination);
+      } catch (e) {
+        // Some browsers may disallow direct connect; ignore
+      }
+    } catch (e) {
+      console.warn('Failed to start microphone capture', e);
+    }
+  }, []);
+
+  const stopMicrophone = useCallback(() => {
+    try {
+      if (micProcessorRef.current) {
+        try { micProcessorRef.current.disconnect(); } catch (e) {}
+        micProcessorRef.current.onaudioprocess = null as any;
+        micProcessorRef.current = null;
+      }
+      if (micAudioCtxRef.current) {
+        try { micAudioCtxRef.current.close(); } catch (e) {}
+        micAudioCtxRef.current = null;
+      }
+      if (micStreamRef.current) {
+        micStreamRef.current.getTracks().forEach((t) => { try { t.stop(); } catch (e) {} });
+        micStreamRef.current = null;
+      }
+    } catch (e) {
+      /* ignore */
+    }
+  }, []);
+
   const sendPrompt = useCallback((text?: string) => {
     const prompt = text || 'Describe the most recent image and list any medications visible. Keep it under 3 sentences.';
     try {
@@ -205,5 +302,5 @@ export function useLiveAgent(onMessage?: (msg: string) => void) {
     }
   }, []);
 
-  return { status, connect, disconnect, sendPrompt };
+  return { status, connect, disconnect, sendPrompt, startMicrophone, stopMicrophone };
 }

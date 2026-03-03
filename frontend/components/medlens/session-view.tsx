@@ -66,7 +66,7 @@ export function SessionView({ onStop }: { onStop: () => void }) {
   const timeoutRefs = useRef<NodeJS.Timeout[]>([])
   const videoRef = useRef<HTMLVideoElement | null>(null)
 
-  const { connect, disconnect, sendPrompt } = useLiveAgent((msg) => {
+  const { connect, disconnect, sendPrompt, startMicrophone, stopMicrophone } = useLiveAgent((msg) => {
     setCurrentMessage((prev) => {
       // Append text, assuming parts come in chunks
       // Optionally just replace it if you want only the latest chunk
@@ -105,7 +105,8 @@ export function SessionView({ onStop }: { onStop: () => void }) {
           width: { ideal: 1280 },
           height: { ideal: 720 },
         },
-        audio: false,
+        // Ask for microphone permission so we can stream to the live agent
+        audio: true,
       }
 
       if (navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === "function") {
@@ -129,6 +130,14 @@ export function SessionView({ onStop }: { onStop: () => void }) {
           videoRef.current.srcObject = localStream
           // Connect to the backend when starting the camera
           connect(videoRef.current)
+          // Start microphone capture and streaming (best-effort). If the
+          // provided stream includes audio, pass it to the hook to avoid
+          // re-requesting permissions.
+          try {
+            startMicrophone?.(localStream)
+          } catch (e) {
+            /* ignore */
+          }
         } catch (e) {
           // ignore assignment errors in some environments
           connect()
@@ -210,6 +219,7 @@ export function SessionView({ onStop }: { onStop: () => void }) {
       } catch (e) {
         /* ignore */
       }
+      try { stopMicrophone?.() } catch (e) { /* ignore */ }
       // ensure video element is cleaned
       if (videoRef.current) {
         try {
@@ -426,6 +436,8 @@ export function SessionView({ onStop }: { onStop: () => void }) {
 
               streamRef.current = null
               setStream(null)
+              // stop microphone streaming if active
+              try { stopMicrophone?.() } catch (e) { /* ignore */ }
               disconnect()
 
               onStop()
