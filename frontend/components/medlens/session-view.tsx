@@ -55,9 +55,10 @@ interface Detection {
   delay: number
 }
 
-export function SessionView({ onStop }: { onStop: () => void }) {
+export function SessionView({ onStop }: { onStop: (summary?: any) => void }) {
   const [detections, setDetections] = useState<Detection[]>([])
   const [currentMessage, setCurrentMessage] = useState("")
+  const [transcript, setTranscript] = useState<{ speaker: 'user' | 'agent'; text: string }[]>([])
   const [isListening, setIsListening] = useState(false)
   const [stream, setStream] = useState<MediaStream | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -68,20 +69,69 @@ export function SessionView({ onStop }: { onStop: () => void }) {
 
   const { connect, disconnect, sendPrompt, startMicrophone, stopMicrophone } = useLiveAgent((msg) => {
     setCurrentMessage((prev) => {
-      // Append text, assuming parts come in chunks
-      // Optionally just replace it if you want only the latest chunk
       if (prev === "Analyzing image...") return msg
       return prev + " " + msg
+    })
+    setTranscript((prev) => {
+      // append agent utterance with role label; keep transcript bounded
+      const next = [...prev, { speaker: 'agent' as const, text: msg }]
+      if (next.length > 400) return next.slice(next.length - 400)
+      return next
     })
     setIsListening(true)
   })
 
-  // Session timer
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setSessionTime((prev) => prev + 1)
-    }, 1000)
-    return () => clearInterval(interval)
+  const recognitionRef = useRef<any>(null)
+  const startSpeechRecognition = useCallback(() => {
+    const SpeechRecognition = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition
+    if (!SpeechRecognition) return
+    try {
+      const rec = new SpeechRecognition()
+      rec.continuous = true
+      rec.interimResults = false
+      rec.lang = 'en-US'
+
+      rec.onresult = (ev: any) => {
+        try {
+          for (let i = ev.resultIndex; i < ev.results.length; i++) {
+            const r = ev.results[i]
+            if (r.isFinal) {
+              const text = r[0]?.transcript?.trim()
+              if (text) {
+                setTranscript((prev) => {
+                  const next = [...prev, { speaker: 'user' as const, text }]
+                  if (next.length > 400) return next.slice(next.length - 400)
+                  return next
+                })
+              }
+            }
+          }
+        } catch (e) {
+          /* ignore */
+        }
+      }
+
+      rec.onerror = () => {
+        // ignore errors silently
+      }
+
+      rec.start()
+      recognitionRef.current = rec
+    } catch (e) {
+      // ignore
+    }
+  }, [])
+
+  const stopSpeechRecognition = useCallback(() => {
+    try {
+      const r = recognitionRef.current
+      if (r && typeof r.stop === 'function') {
+        try { r.stop() } catch (e) {}
+      }
+      recognitionRef.current = null
+    } catch (e) {
+      /* ignore */
+    }
   }, [])
 
   // Start with listening text instead of launching simulated delays
@@ -135,6 +185,9 @@ export function SessionView({ onStop }: { onStop: () => void }) {
           // re-requesting permissions.
           try {
             startMicrophone?.(localStream)
+            // start client-side speech recognition (best-effort) to capture
+            // user utterances for a labeled transcript
+            try { startSpeechRecognition() } catch (e) { /* ignore */ }
           } catch (e) {
             /* ignore */
           }
@@ -220,6 +273,7 @@ export function SessionView({ onStop }: { onStop: () => void }) {
         /* ignore */
       }
       try { stopMicrophone?.() } catch (e) { /* ignore */ }
+      try { stopSpeechRecognition() } catch (e) { /* ignore */ }
       // ensure video element is cleaned
       if (videoRef.current) {
         try {
@@ -248,6 +302,35 @@ export function SessionView({ onStop }: { onStop: () => void }) {
     const s = (seconds % 60).toString().padStart(2, "0")
     return `${m}:${s}`
   }, [])
+
+  // Simple client-side summarizer: pick a few representative sentences
+  const generateSummary = useCallback(() => {
+    const joined = transcript.map((t) => `${t.speaker === 'user' ? 'User' : 'Agent'}: ${t.text}`).join(' ').trim() || currentMessage || ''
+    const sentences = joined.split(/(?<=[.!?])\s+/).filter(Boolean)
+    // pick up to 3 short sentences
+    const picked: string[] = []
+    for (const s of sentences) {
+      if (picked.length >= 3) break
+      const trimmed = s.trim()
+      if (trimmed.length === 0) continue
+      picked.push(trimmed)
+    }
+
+    const medications = detections.length > 0
+      ? detections.map((d) => ({ name: d.label }))
+      : // attempt to extract tokens like 'Name 10mg' from joined text
+        Array.from(new Set((joined.match(/([A-Z][a-z]+\s?\d+mg)/g) || []))).map((s) => ({ name: s }))
+
+    const summaryText = picked.length > 0 ? picked.join(' ') : (joined.slice(0, 280) || 'No summary available.')
+
+    const summary = {
+      summaryText,
+      medications,
+      transcript,
+      endedAt: Date.now(),
+    }
+    return summary
+  }, [transcript, currentMessage, detections])
 
   return (
     <div className="fixed inset-0 z-50 bg-foreground">
@@ -405,7 +488,7 @@ export function SessionView({ onStop }: { onStop: () => void }) {
 
         {/* Stop button */}
         <button
-          onClick={() => {
+            onClick={() => {
               // stop any running timers
               timeoutRefs.current.forEach(clearTimeout)
               timeoutRefs.current = []
@@ -440,7 +523,13 @@ export function SessionView({ onStop }: { onStop: () => void }) {
               try { stopMicrophone?.() } catch (e) { /* ignore */ }
               disconnect()
 
-              onStop()
+              // generate a concise summary and pass it upstream
+              try {
+                const summary = generateSummary()
+                onStop?.(summary)
+              } catch (e) {
+                onStop()
+              }
             }}
           className="flex items-center gap-2 h-11 px-6 rounded-xl bg-destructive text-card font-medium text-sm hover:bg-destructive/90 transition-colors cursor-pointer"
         >

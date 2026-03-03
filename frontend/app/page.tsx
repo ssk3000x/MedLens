@@ -14,13 +14,21 @@ type AppView = "landing" | "session" | "summary"
 
 export default function Home() {
   const [view, setView] = useState<AppView>("landing")
+  const [lastSummary, setLastSummary] = useState<any>(null)
 
   if (view === "session") {
-    return <SessionView onStop={() => setView("summary")} />
+    return (
+      <SessionView
+        onStop={(summary?: any) => {
+          if (summary) setLastSummary(summary)
+          setView("summary")
+        }}
+      />
+    )
   }
 
   if (view === "summary") {
-    return <SummaryDashboard onBack={() => setView("landing")} />
+    return <SummaryDashboard onBack={() => setView("landing")} summary={lastSummary} />
   }
 
   return (

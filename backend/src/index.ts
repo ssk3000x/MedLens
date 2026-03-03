@@ -5,10 +5,12 @@ import dotenv from 'dotenv';
 import admin from 'firebase-admin';
 import fs from 'fs';
 import crypto from 'crypto';
+import bodyParser from 'body-parser';
 
 dotenv.config();
 
 const app = express();
+app.use(bodyParser.json({ limit: '1mb' }));
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
@@ -347,3 +349,139 @@ const PORT = 8081;
 server.listen(PORT, () => {
   console.log(`🚀 BACKEND ENGINE RUNNING: http://localhost:${PORT}`);
 });
+
+// Summarization endpoint: accepts { transcript: Array<{speaker,text}> }
+app.post('/summarize', async (req, res) => {
+  try {
+    const payload = req.body || {}
+    const transcript = payload.transcript || []
+
+    // sanitize transcript: remove model-internal annotations (e.g., **thoughts**),
+    // drop grounding/status lines, and remove quote characters from user text.
+    const sanitizeEntry = (t: any) => {
+      let text = String(t.text || '')
+      // remove bold/annotation markers like **internal thought**
+      text = text.replace(/\*\*.*?\*\*/g, '')
+      // remove common grounding/status phrases
+      const sentences = text.split(/(?<=[.!?])\s+/).filter(Boolean)
+      const filtered = sentences.filter((s) => !/grounding|google search|search grounding|grounded/i.test(s))
+      text = filtered.join(' ').trim()
+      if (t.speaker === 'user') {
+        // remove quote characters to reduce verbatim reproduction
+        text = text.replace(/["'`]/g, '')
+      }
+      return text
+    }
+
+    const sanitized: string[] = []
+    for (const t of transcript) {
+      const clean = sanitizeEntry(t)
+      if (!clean) continue
+      const label = t.speaker === 'user' ? 'User' : 'Agent'
+      sanitized.push(`${label}: ${clean}`)
+    }
+    const joined = sanitized.join('\n')
+
+    if (!process.env.GENAI_API_KEY) {
+      // Fallback: simple heuristic summary
+      const sentences = joined.split(/(?<=[.!?])\s+/).filter(Boolean)
+      const summary = sentences.slice(0, 3).join(' ') || 'No summary available.'
+      return res.json({ summary, method: 'heuristic' })
+    }
+
+    const HOST = 'generativelanguage.googleapis.com'
+    const wsUrl = `wss://${HOST}/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${process.env.GENAI_API_KEY}`
+
+    const genWs = new WSClient(wsUrl)
+
+    const timeoutMs = 15000
+    let finished = false
+
+    const resultTextParts: string[] = []
+
+    const setupMessage = {
+      setup: {
+        model: "models/gemini-2.5-flash-native-audio-preview-12-2025",
+        generationConfig: {
+          responseModalities: ["TEXT"],
+        },
+        systemInstruction: {
+          role: "system",
+          parts: [{ text: SYSTEM_PROMPT + "\n\nWhen summarizing, do NOT repeat user or agent text verbatim. Paraphrase the user's requests and the agent's responses. Remove any model-internal annotations (for example anything previously enclosed in **bold**). Produce a concise 2-3 sentence summary focusing on events and detected medications. Do not provide medical advice; instead state if follow-up is recommended." }]
+        }
+      }
+    }
+
+    const clientContent = {
+      clientContent: {
+        turnComplete: true,
+        turns: [{ role: 'user', parts: [{ text: `Summarize this session (paraphrase, do not quote):\n\n${joined}` }] }]
+      }
+    }
+
+    const waitForResponse = new Promise((resolve, reject) => {
+      const to = setTimeout(() => {
+        if (!finished) {
+          finished = true
+          try { genWs.close() } catch (e) {}
+          resolve({ summary: resultTextParts.join(' '), method: 'partial-timeout' })
+        }
+      }, timeoutMs)
+
+      genWs.on('open', () => {
+        try {
+          genWs.send(JSON.stringify(setupMessage))
+        } catch (e) {
+          /* ignore */
+        }
+        // send the client content shortly after setup
+        setTimeout(() => {
+          try { genWs.send(JSON.stringify(clientContent)) } catch (e) {}
+        }, 200)
+      })
+
+      genWs.on('message', (msg: any) => {
+        try {
+          const data = JSON.parse(msg.toString())
+          if (data.serverContent?.modelTurn?.parts) {
+            for (const p of data.serverContent.modelTurn.parts) {
+              if (p.text) resultTextParts.push(p.text)
+            }
+          }
+
+          if (data.serverContent?.turnComplete && !finished) {
+            finished = true
+            clearTimeout(to)
+            try { genWs.close() } catch (e) {}
+            resolve({ summary: resultTextParts.join(' '), method: 'model' })
+          }
+        } catch (e) {
+          // ignore parse
+        }
+      })
+
+      genWs.on('error', (err: any) => {
+        if (!finished) {
+          finished = true
+          clearTimeout(to)
+          try { genWs.close() } catch (e) {}
+          resolve({ summary: resultTextParts.join(' '), method: 'error' })
+        }
+      })
+
+      genWs.on('close', () => {
+        if (!finished) {
+          finished = true
+          clearTimeout(to)
+          resolve({ summary: resultTextParts.join(' '), method: 'closed' })
+        }
+      })
+    })
+
+    const resp: any = await waitForResponse
+    return res.json(resp)
+  } catch (e) {
+    console.error('Summarize error', e)
+    return res.status(500).json({ error: String(e) })
+  }
+})

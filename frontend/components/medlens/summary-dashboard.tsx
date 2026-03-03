@@ -61,7 +61,12 @@ const schedule = [
   { time: "10:00 PM", medications: ["Atorvastatin 20mg"], meal: "Before bed" },
 ]
 
-export function SummaryDashboard({ onBack }: { onBack: () => void }) {
+export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summary?: any }) {
+  // runtime-provided summary (from SessionView) overrides static content when present
+  const runtimeMeds = summary?.medications || null
+  const runtimeSummaryText = summary?.aiSummary || summary?.summaryText || null
+  const runtimeTranscript = summary?.transcript || null
+
   return (
     <div className="min-h-screen bg-background">
       {/* Header */}
@@ -93,18 +98,38 @@ export function SummaryDashboard({ onBack }: { onBack: () => void }) {
           </p>
         </div>
 
-        {/* Overall Safety Status */}
-        <div className="flex flex-col items-center gap-3 p-8 rounded-2xl bg-primary/5 border border-primary/20">
-          <div className="flex items-center justify-center size-16 rounded-full bg-primary/10">
-            <ShieldCheck className="size-8 text-primary" />
+        {/* Overall Summary (runtime) or fallback status */}
+        {runtimeSummaryText ? (
+          <div className="flex flex-col items-start gap-3 p-6 rounded-2xl bg-card border border-border">
+            <h2 className="text-lg font-semibold text-foreground">Session summary</h2>
+            <p className="text-sm text-muted-foreground">{runtimeSummaryText}</p>
+            {runtimeTranscript && runtimeTranscript.length > 0 && (
+              <details className="mt-2 text-xs text-muted-foreground">
+                <summary className="cursor-pointer">View transcript ({runtimeTranscript.length} lines)</summary>
+                <div className="mt-2">
+                  {runtimeTranscript.map((t: any, i: number) => (
+                    <p key={i} className="text-xs py-1 border-b border-border">
+                      <strong className="uppercase text-[10px] tracking-wider mr-2">{t.speaker}</strong>
+                      {t.text}
+                    </p>
+                  ))}
+                </div>
+              </details>
+            )}
           </div>
-          <h2 className="text-xl font-bold text-foreground">
-            No Critical Interactions Found
-          </h2>
-          <p className="text-sm text-muted-foreground text-center max-w-md">
-            All 3 detected medications have been cross-checked against FDA databases. One minor note was flagged for your awareness.
-          </p>
-        </div>
+        ) : (
+          <div className="flex flex-col items-center gap-3 p-8 rounded-2xl bg-primary/5 border border-primary/20">
+            <div className="flex items-center justify-center size-16 rounded-full bg-primary/10">
+              <ShieldCheck className="size-8 text-primary" />
+            </div>
+            <h2 className="text-xl font-bold text-foreground">
+              No Critical Interactions Found
+            </h2>
+            <p className="text-sm text-muted-foreground text-center max-w-md">
+              All 3 detected medications have been cross-checked against FDA databases. One minor note was flagged for your awareness.
+            </p>
+          </div>
+        )}
 
         {/* Detected Medications */}
         <section className="flex flex-col gap-4">
@@ -114,10 +139,10 @@ export function SummaryDashboard({ onBack }: { onBack: () => void }) {
               Detected Medications
             </h2>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {detectedMedications.map((med) => (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {(runtimeMeds ?? detectedMedications).map((med: any) => (
               <div
-                key={med.name}
+                key={med.name || med.label || String(med)}
                 className="flex flex-col gap-3 p-5 rounded-xl border border-border bg-card"
               >
                 <div className="flex items-start justify-between">
@@ -126,7 +151,7 @@ export function SummaryDashboard({ onBack }: { onBack: () => void }) {
                       {med.name}
                     </h3>
                     <span className="text-xs text-muted-foreground">
-                      {med.type}
+                      {med.type || ''}
                     </span>
                   </div>
                   {med.status === "safe" ? (
