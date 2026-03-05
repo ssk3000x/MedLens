@@ -9,6 +9,7 @@ import { SafetySection } from "@/components/medlens/safety-section"
 import { Footer } from "@/components/medlens/footer"
 import { SessionView } from "@/components/medlens/session-view"
 import { SummaryDashboard } from "@/components/medlens/summary-dashboard"
+import { GoogleHealthConnect } from "@/components/medlens/google-health-connect"
 
 type AppView = "landing" | "session" | "summary"
 
@@ -36,6 +37,12 @@ export default function Home() {
       <Navbar onStart={() => setView("session")} />
       <main>
         <HeroSection onStart={() => setView("session")} />
+
+        {/* Google Health Connect — connect fitness data */}
+        <div className="py-12">
+          <GoogleHealthConnect />
+        </div>
+
         <FeaturesSection />
         <HowItWorksSection />
         <SafetySection />
