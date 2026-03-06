@@ -2,7 +2,6 @@
 
 import { useState } from "react"
 import { Navbar } from "@/components/medlens/navbar"
-import { HeroSection } from "@/components/medlens/hero-section"
 import { FeaturesSection } from "@/components/medlens/features-section"
 import { HowItWorksSection } from "@/components/medlens/how-it-works-section"
 import { SafetySection } from "@/components/medlens/safety-section"
@@ -36,12 +35,8 @@ export default function Home() {
     <div className="min-h-screen bg-background">
       <Navbar onStart={() => setView("session")} />
       <main>
-        <HeroSection onStart={() => setView("session")} />
-
-        {/* Google Health Connect — connect fitness data */}
-        <div className="py-12">
-          <GoogleHealthConnect />
-        </div>
+        {/* Google Health Connect — hero + main CTA */}
+        <GoogleHealthConnect onStart={() => setView("session")} />
 
         <FeaturesSection />
         <HowItWorksSection />
