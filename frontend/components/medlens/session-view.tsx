@@ -8,26 +8,18 @@ const BACKEND_URL = 'http://localhost:8081'
 
 export function SessionView({ onStop }: { onStop: (summary?: any) => void }) {
   const [currentMessage, setCurrentMessage] = useState("")
-  const [transcript, setTranscript] = useState<{ speaker: 'user' | 'agent'; text: string }[]>([])
   const transcriptRef = useRef<{ speaker: 'user' | 'agent'; text: string }[]>([])
   const [isListening, setIsListening] = useState(false)
   const [isStopping, setIsStopping] = useState(false)
-  const [stream, setStream] = useState<MediaStream | null>(null)
-  const streamRef = useRef<MediaStream | null>(null)
   const [cameraError, setCameraError] = useState<string | null>(null)
   const [sessionTime, setSessionTime] = useState(0)
   const videoRef = useRef<HTMLVideoElement | null>(null)
+  const activeStreamRef = useRef<MediaStream | null>(null)
 
-  // Helper to add to transcript (both state and ref)
   const addToTranscript = useCallback((entry: { speaker: 'user' | 'agent'; text: string }) => {
-    setTranscript((prev) => {
-      const next = [...prev, entry]
-      transcriptRef.current = next
-      return next
-    })
+    transcriptRef.current = [...transcriptRef.current, entry]
   }, [])
 
-  // FIX: Wrap the callback so it doesn't cause an infinite loop
   const handleAgentMessage = useCallback((msg: string) => {
     setCurrentMessage((prev) => (prev === "Analyzing..." ? msg : prev + " " + msg))
     addToTranscript({ speaker: 'agent', text: msg })
@@ -36,48 +28,79 @@ export function SessionView({ onStop }: { onStop: (summary?: any) => void }) {
 
   const { connect, disconnect, sendPrompt, startMicrophone } = useLiveAgent(handleAgentMessage)
 
-  const startCamera = useCallback(async () => {
-    try {
-      // Clear old streams if they exist
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(t => t.stop())
-      }
+  const connectRef = useRef(connect)
+  const disconnectRef = useRef(disconnect)
+  const startMicRef = useRef(startMicrophone)
+  connectRef.current = connect
+  disconnectRef.current = disconnect
+  startMicRef.current = startMicrophone
 
-      const localStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment", width: 640, height: 480 },
-        audio: true,
-      })
-
-      setStream(localStream)
-      streamRef.current = localStream
-      
-      if (videoRef.current) {
-        videoRef.current.srcObject = localStream
-        connect(videoRef.current)
-        startMicrophone(localStream)
-      }
-    } catch (err: any) {
-      console.error("Camera Error:", err)
-      setCameraError(err.message || "Camera access denied")
+  const stopAllMedia = useCallback(() => {
+    // Kill active stream tracks
+    if (activeStreamRef.current) {
+      activeStreamRef.current.getTracks().forEach(t => { t.stop(); t.enabled = false })
+      activeStreamRef.current = null
     }
-  }, [connect, startMicrophone])
+    // Detach video element
+    if (videoRef.current) {
+      videoRef.current.pause()
+      videoRef.current.srcObject = null
+    }
+  }, [])
 
   useEffect(() => {
-    startCamera()
+    let cancelled = false
+    let localStream: MediaStream | null = null
+
+    const init = async () => {
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "environment", width: 640, height: 480 },
+          audio: true,
+        })
+
+        // If this effect was already cleaned up, kill the stream immediately
+        if (cancelled) {
+          localStream.getTracks().forEach(t => t.stop())
+          return
+        }
+
+        activeStreamRef.current = localStream
+
+        if (videoRef.current) {
+          videoRef.current.srcObject = localStream
+          connectRef.current(videoRef.current)
+          startMicRef.current(localStream)
+        }
+      } catch (err: any) {
+        if (!cancelled) {
+          console.error("Camera Error:", err)
+          setCameraError(err.message || "Camera access denied")
+        }
+      }
+    }
+
+    init()
     const timer = setInterval(() => setSessionTime(p => p + 1), 1000)
+
     return () => {
+      cancelled = true
       clearInterval(timer)
-      disconnect()
-      // Stop all camera/mic tracks on unmount
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(t => t.stop())
-        streamRef.current = null
+      disconnectRef.current()
+      // Kill stream that was assigned
+      if (activeStreamRef.current) {
+        activeStreamRef.current.getTracks().forEach(t => t.stop())
+        activeStreamRef.current = null
+      }
+      // Also kill localStream directly in case it resolved after cleanup started
+      if (localStream) {
+        localStream.getTracks().forEach(t => t.stop())
       }
       if (videoRef.current) {
         videoRef.current.srcObject = null
       }
     }
-  }, [startCamera, disconnect])
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const formatTime = (s: number) => `${Math.floor(s / 60).toString().padStart(2, "0")}:${(s % 60).toString().padStart(2, "0")}`
 
@@ -85,8 +108,12 @@ export function SessionView({ onStop }: { onStop: (summary?: any) => void }) {
     <div className="fixed inset-0 z-50 bg-black">
       {cameraError ? (
         <div className="flex items-center justify-center h-full text-white">{cameraError}</div>
-      ) : (
+      ) : !isStopping ? (
         <video ref={videoRef} autoPlay playsInline muted className="absolute inset-0 w-full h-full object-cover" />
+      ) : (
+        <div className="flex items-center justify-center h-full">
+          <Loader2 size={48} className="text-white animate-spin" />
+        </div>
       )}
       
       <div className="absolute top-0 left-0 right-0 p-4 flex flex-col items-center">
@@ -121,12 +148,12 @@ export function SessionView({ onStop }: { onStop: (summary?: any) => void }) {
             onClick={async () => {
               setIsStopping(true)
               setCurrentMessage("Generating summary...")
+
+              // 1. Disconnect websocket + audio contexts
               disconnect()
 
-              // Stop camera tracks
-              if (streamRef.current) {
-                streamRef.current.getTracks().forEach(t => t.stop())
-              }
+              // 2. Stop all media tracks
+              stopAllMedia()
 
               const currentTranscript = transcriptRef.current
               console.log('📤 Sending transcript to backend:', currentTranscript.length, 'messages')
@@ -142,6 +169,7 @@ export function SessionView({ onStop }: { onStop: (summary?: any) => void }) {
                 onStop({
                   transcript: currentTranscript,
                   aiSummary: data.summary || 'No summary available.',
+                  medications: data.medications || null,
                   method: data.method,
                 })
               } catch (err) {

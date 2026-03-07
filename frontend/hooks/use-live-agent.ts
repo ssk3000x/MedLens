@@ -7,14 +7,22 @@ export function useLiveAgent(onMessage?: (msg: string) => void) {
   const audioCtxRef = useRef<AudioContext | null>(null);
   const nextAudioStartTimeRef = useRef<number>(0);
 
+  const disposedRef = useRef(false);
+
   const connect = useCallback((videoElement?: HTMLVideoElement) => {
     // If already connected or connecting, don't start again
     if (socketRef.current?.readyState === WebSocket.OPEN || socketRef.current?.readyState === WebSocket.CONNECTING) return;
 
+    disposedRef.current = false;
     setStatus('connecting');
     const socket = new WebSocket('wss://medlens-backend-88029418749.us-central1.run.app');
 
     socket.onopen = () => {
+      // If disconnect() was called while we were connecting, bail out
+      if (disposedRef.current) {
+        socket.close();
+        return;
+      }
       setStatus('connected');
       console.log('🔗 Connected to Cloud');
       socket.send(JSON.stringify({ type: 'session_start', sessionId: 'hack-test-' + Date.now() }));
@@ -22,8 +30,13 @@ export function useLiveAgent(onMessage?: (msg: string) => void) {
       if (videoElement) {
         if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
         frameIntervalRef.current = setInterval(() => {
+          if (disposedRef.current) {
+            clearInterval(frameIntervalRef.current!);
+            frameIntervalRef.current = null;
+            return;
+          }
           const canvas = document.createElement('canvas');
-          canvas.width = 480; canvas.height = 360; // Lower res for stability
+          canvas.width = 480; canvas.height = 360;
           const ctx = canvas.getContext('2d');
           ctx?.drawImage(videoElement, 0, 0, 480, 360);
           if (socket.readyState === WebSocket.OPEN) {
@@ -73,15 +86,29 @@ export function useLiveAgent(onMessage?: (msg: string) => void) {
     socket.onclose = () => {
       console.log("❌ Socket Closed");
       setStatus('disconnected');
-      if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
+      if (frameIntervalRef.current) {
+        clearInterval(frameIntervalRef.current);
+        frameIntervalRef.current = null;
+      }
     };
     
     socketRef.current = socket;
   }, [onMessage]);
 
+  const micCtxRef = useRef<AudioContext | null>(null);
+  const micProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const allMicCtxsRef = useRef<Set<AudioContext>>(new Set());
+
   const startMicrophone = useCallback(async (stream: MediaStream) => {
     try {
+      // Clean up any previous mic context first
+      if (micProcessorRef.current) { micProcessorRef.current.disconnect(); micProcessorRef.current = null; }
+      if (micSourceRef.current) { micSourceRef.current.disconnect(); micSourceRef.current = null; }
+      if (micCtxRef.current) { micCtxRef.current.close(); micCtxRef.current = null; }
+
       const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+      allMicCtxsRef.current.add(audioCtx);
       const source = audioCtx.createMediaStreamSource(stream);
       const processor = audioCtx.createScriptProcessor(4096, 1, 1);
       
@@ -97,15 +124,44 @@ export function useLiveAgent(onMessage?: (msg: string) => void) {
       };
       source.connect(processor);
       processor.connect(audioCtx.destination);
+
+      micCtxRef.current = audioCtx;
+      micProcessorRef.current = processor;
+      micSourceRef.current = source;
     } catch (err) {
       console.error("Mic Hook Error:", err);
     }
   }, []);
 
   const disconnect = useCallback(() => {
+    disposedRef.current = true;
     if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
+    frameIntervalRef.current = null;
     socketRef.current?.close();
-    if (audioCtxRef.current) audioCtxRef.current.close();
+    socketRef.current = null;
+    // Close playback audio context
+    if (audioCtxRef.current) {
+      audioCtxRef.current.close();
+      audioCtxRef.current = null;
+    }
+    // Disconnect current mic nodes
+    if (micProcessorRef.current) {
+      micProcessorRef.current.disconnect();
+      micProcessorRef.current = null;
+    }
+    if (micSourceRef.current) {
+      micSourceRef.current.disconnect();
+      micSourceRef.current = null;
+    }
+    if (micCtxRef.current) {
+      micCtxRef.current.close();
+      micCtxRef.current = null;
+    }
+    // Kill ALL mic audio contexts ever created (handles Strict Mode duplicates)
+    allMicCtxsRef.current.forEach(ctx => {
+      try { ctx.close(); } catch (_) {}
+    });
+    allMicCtxsRef.current.clear();
   }, []);
 
   const sendPrompt = useCallback((text: string) => {

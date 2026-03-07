@@ -13,28 +13,10 @@ import {
   Clock,
 } from "lucide-react"
 
-const detectedMedications = [
-  {
-    name: "Metformin 500mg",
-    type: "Biguanide",
-    purpose: "Type 2 Diabetes",
-    dosage: "500mg twice daily",
-    status: "safe" as const,
-  },
-  {
-    name: "Lisinopril 10mg",
-    type: "ACE Inhibitor",
-    purpose: "Hypertension",
-    dosage: "10mg once daily",
-    status: "safe" as const,
-  },
-  {
-    name: "Atorvastatin 20mg",
-    type: "Statin",
-    purpose: "Cholesterol",
-    dosage: "20mg at bedtime",
-    status: "warning" as const,
-  },
+const defaultMedications = [
+  { name: "N/A", type: "N/A", purpose: "N/A", dosage: "N/A", status: "safe" as const },
+  { name: "N/A", type: "N/A", purpose: "N/A", dosage: "N/A", status: "safe" as const },
+  { name: "N/A", type: "N/A", purpose: "N/A", dosage: "N/A", status: "safe" as const },
 ]
 
 const interactionResults = [
@@ -64,8 +46,39 @@ const schedule = [
 export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summary?: any }) {
   // runtime-provided summary (from SessionView) overrides static content when present
   const runtimeMeds = summary?.medications || null
-  const runtimeSummaryText = summary?.aiSummary || summary?.summaryText || null
+  const runtimeSummaryRaw = summary?.aiSummary || summary?.summaryText || null
   const runtimeTranscript = summary?.transcript || null
+
+  // Normalize summary into clean bullet strings regardless of format
+  const summaryBullets: string[] = (() => {
+    let src = runtimeSummaryRaw
+    if (!src) return []
+    // If object/array, extract the useful part
+    if (typeof src === 'object') {
+      if (Array.isArray(src)) {
+        src = src.join('\n')
+      } else if (src.summary) {
+        src = Array.isArray(src.summary) ? src.summary.join('\n') : String(src.summary)
+      } else {
+        src = JSON.stringify(src)
+      }
+    }
+    // Try parsing as JSON string
+    if (typeof src === 'string') {
+      try {
+        const parsed = JSON.parse(src)
+        if (Array.isArray(parsed)) {
+          src = parsed.join('\n')
+        } else if (parsed?.summary) {
+          src = Array.isArray(parsed.summary) ? parsed.summary.join('\n') : String(parsed.summary)
+        }
+      } catch (_) { /* not JSON, use as-is */ }
+    }
+    return String(src)
+      .split(/\n|•/)
+      .map((l: string) => l.replace(/^[\-\s"]+|["]+$/g, '').trim())
+      .filter((l: string) => l.length > 0)
+  })()
 
   return (
     <div className="min-h-screen bg-background">
@@ -99,10 +112,17 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
         </div>
 
         {/* Overall Summary (runtime) or fallback status */}
-        {runtimeSummaryText ? (
+        {summaryBullets.length > 0 ? (
           <div className="flex flex-col items-start gap-3 p-6 rounded-2xl bg-card border border-border">
-            <h2 className="text-lg font-semibold text-foreground">Session summary</h2>
-            <p className="text-sm text-muted-foreground">{runtimeSummaryText}</p>
+            <h2 className="text-lg font-semibold text-foreground">Session Summary</h2>
+            <ul className="flex flex-col gap-2.5 w-full">
+              {summaryBullets.map((line: string, i: number) => (
+                  <li key={i} className="flex items-start gap-3 text-sm text-muted-foreground leading-relaxed">
+                    <span className="mt-1 size-1.5 rounded-full bg-primary flex-shrink-0" />
+                    {line}
+                  </li>
+                ))}
+            </ul>
             {runtimeTranscript && runtimeTranscript.length > 0 && (
               <details className="mt-2 text-xs text-muted-foreground">
                 <summary className="cursor-pointer">View transcript ({runtimeTranscript.length} lines)</summary>
@@ -140,7 +160,7 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
             </h2>
           </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {(runtimeMeds ?? detectedMedications).map((med: any) => (
+            {(runtimeMeds ?? defaultMedications).map((med: any) => (
               <div
                 key={med.name || med.label || String(med)}
                 className="flex flex-col gap-3 p-5 rounded-xl border border-border bg-card"
