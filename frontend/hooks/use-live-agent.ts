@@ -17,7 +17,7 @@ export function useLiveAgent(onMessage?: (msg: string) => void) {
     setStatus('connecting');
     const socket = new WebSocket('wss://medlens-backend-88029418749.us-central1.run.app');
 
-    socket.onopen = () => {
+    socket.onopen = async () => {
       // If disconnect() was called while we were connecting, bail out
       if (disposedRef.current) {
         socket.close();
@@ -25,7 +25,19 @@ export function useLiveAgent(onMessage?: (msg: string) => void) {
       }
       setStatus('connected');
       console.log('🔗 Connected to Cloud');
-      socket.send(JSON.stringify({ type: 'session_start', sessionId: 'hack-test-' + Date.now() }));
+      // Attempt to fetch a Google access token stored by the app
+      let accessToken: string | null = null;
+      try {
+        const resp = await fetch('/api/auth/token');
+        if (resp.ok) {
+          const j = await resp.json();
+          accessToken = j?.accessToken || null;
+        }
+      } catch (e) {
+        console.warn('Could not fetch access token for session_start', e);
+      }
+
+      socket.send(JSON.stringify({ type: 'session_start', sessionId: 'hack-test-' + Date.now(), accessToken }));
       
       if (videoElement) {
         if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);

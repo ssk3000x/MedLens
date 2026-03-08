@@ -13,6 +13,8 @@ const SCOPES = [
   'https://www.googleapis.com/auth/fitness.blood_glucose.read',
   'https://www.googleapis.com/auth/fitness.oxygen_saturation.read',
   'https://www.googleapis.com/auth/fitness.body_temperature.read',
+  // Allow composing emails so the agent can create drafts on the user's behalf
+  'https://www.googleapis.com/auth/gmail.compose',
 ]
 
 export async function GET() {
