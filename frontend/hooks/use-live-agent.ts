@@ -27,17 +27,19 @@ export function useLiveAgent(onMessage?: (msg: string) => void) {
       console.log('🔗 Connected to Cloud');
       // Attempt to fetch a Google access token stored by the app
       let accessToken: string | null = null;
+      let refreshToken: string | null = null;
       try {
         const resp = await fetch('/api/auth/token');
         if (resp.ok) {
           const j = await resp.json();
           accessToken = j?.accessToken || null;
+          refreshToken = j?.refreshToken || null;
         }
       } catch (e) {
         console.warn('Could not fetch access token for session_start', e);
       }
 
-      socket.send(JSON.stringify({ type: 'session_start', sessionId: 'hack-test-' + Date.now(), accessToken }));
+      socket.send(JSON.stringify({ type: 'session_start', sessionId: 'hack-test-' + Date.now(), accessToken, refreshToken }));
       
       if (videoElement) {
         if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
