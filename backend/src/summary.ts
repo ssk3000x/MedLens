@@ -2,8 +2,12 @@ import express from 'express';
 import bodyParser from 'body-parser';
 import cors from 'cors';
 import Anthropic from '@anthropic-ai/sdk';
+import dotenv from 'dotenv';
 
-const ANTHROPIC_API_KEY = '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';
+dotenv.config();
+
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
+if (!ANTHROPIC_API_KEY) console.warn('⚠️ ANTHROPIC_API_KEY not set in environment');
 
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
