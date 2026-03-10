@@ -6,49 +6,55 @@ export function useLiveAgent(onMessage?: (msg: string) => void) {
   const frameIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const nextAudioStartTimeRef = useRef<number>(0);
-
   const disposedRef = useRef(false);
 
-  const connect = useCallback((videoElement?: HTMLVideoElement) => {
-    // If already connected or connecting, don't start again
+  const connect = useCallback(async (videoElement?: HTMLVideoElement) => {
     if (socketRef.current?.readyState === WebSocket.OPEN || socketRef.current?.readyState === WebSocket.CONNECTING) return;
 
     disposedRef.current = false;
     setStatus('connecting');
+
+    // 1. Parallel Fetch: Get OAuth tokens AND the Health Summary
+    let accessToken: string | null = null;
+    let refreshToken: string | null = null;
+    let fitSummary: any = null;
+
+    try {
+      const [tokenRes, fitRes] = await Promise.all([
+        fetch('/api/auth/token'),
+        fetch('/api/fitness/summary', { signal: AbortSignal.timeout(3000) }) // 3s timeout
+      ]);
+
+      if (tokenRes.ok) {
+        const t = await tokenRes.json();
+        accessToken = t.accessToken;
+        refreshToken = t.refreshToken;
+      }
+      if (fitRes.ok) {
+        const f = await fitRes.json();
+        fitSummary = f.fitSummary;
+      }
+    } catch (e) {
+      console.warn('Pre-flight data fetch failed, proceeding with defaults:', e);
+    }
+
     const socket = new WebSocket('wss://medlens-backend-88029418749.us-central1.run.app');
 
-    socket.onopen = async () => {
-      // If disconnect() was called while we were connecting, bail out
-      if (disposedRef.current) {
-        socket.close();
-        return;
-      }
+    socket.onopen = () => {
+      if (disposedRef.current) { socket.close(); return; }
       setStatus('connected');
-      console.log('🔗 Connected to Cloud');
-      // Attempt to fetch a Google access token stored by the app
-      let accessToken: string | null = null;
-      let refreshToken: string | null = null;
-      try {
-        const resp = await fetch('/api/auth/token');
-        if (resp.ok) {
-          const j = await resp.json();
-          accessToken = j?.accessToken || null;
-          refreshToken = j?.refreshToken || null;
-        }
-      } catch (e) {
-        console.warn('Could not fetch access token for session_start', e);
-      }
-
-      socket.send(JSON.stringify({ type: 'session_start', sessionId: 'hack-test-' + Date.now(), accessToken, refreshToken }));
+      
+      // 2. Send everything in the start message
+      socket.send(JSON.stringify({ 
+        type: 'session_start', 
+        sessionId: 'hack-' + Date.now(),
+        accessToken,
+        refreshToken,
+        fitSummary // <--- Injected Health Data
+      }));
       
       if (videoElement) {
-        if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
         frameIntervalRef.current = setInterval(() => {
-          if (disposedRef.current) {
-            clearInterval(frameIntervalRef.current!);
-            frameIntervalRef.current = null;
-            return;
-          }
           const canvas = document.createElement('canvas');
           canvas.width = 480; canvas.height = 360;
           const ctx = canvas.getContext('2d');
@@ -66,123 +72,62 @@ export function useLiveAgent(onMessage?: (msg: string) => void) {
     socket.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        
         if (data.type === 'agent_speech_chunk') {
           const binary = atob(data.data);
           const bytes = new Int16Array(new Uint8Array(binary.split('').map(c => c.charCodeAt(0))).buffer);
-          
-          if (!audioCtxRef.current) {
-            audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-          }
+          if (!audioCtxRef.current) audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
           const audioCtx = audioCtxRef.current;
           if (audioCtx.state === 'suspended') audioCtx.resume();
-
           const floats = new Float32Array(bytes.length);
           for (let i = 0; i < bytes.length; i++) floats[i] = bytes[i] / 32768;
-          
           const buffer = audioCtx.createBuffer(1, floats.length, 24000);
           buffer.getChannelData(0).set(floats);
           const source = audioCtx.createBufferSource();
           source.buffer = buffer;
           source.connect(audioCtx.destination);
-          
           const startTime = Math.max(nextAudioStartTimeRef.current, audioCtx.currentTime);
           source.start(startTime);
           nextAudioStartTimeRef.current = startTime + buffer.duration;
         } else if (data.type === 'agent_speech_text' && onMessage) {
           onMessage(data.text);
         }
-      } catch (e) {
-        console.error("Socket Message Error:", e);
-      }
+      } catch (e) { console.error("Socket Message Error:", e); }
     };
 
     socket.onclose = () => {
-      console.log("❌ Socket Closed");
       setStatus('disconnected');
-      if (frameIntervalRef.current) {
-        clearInterval(frameIntervalRef.current);
-        frameIntervalRef.current = null;
-      }
+      if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
     };
-    
     socketRef.current = socket;
   }, [onMessage]);
 
-  const micCtxRef = useRef<AudioContext | null>(null);
-  const micProcessorRef = useRef<ScriptProcessorNode | null>(null);
-  const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const allMicCtxsRef = useRef<Set<AudioContext>>(new Set());
-
   const startMicrophone = useCallback(async (stream: MediaStream) => {
-    try {
-      // Clean up any previous mic context first
-      if (micProcessorRef.current) { micProcessorRef.current.disconnect(); micProcessorRef.current = null; }
-      if (micSourceRef.current) { micSourceRef.current.disconnect(); micSourceRef.current = null; }
-      if (micCtxRef.current) { micCtxRef.current.close(); micCtxRef.current = null; }
-
-      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-      allMicCtxsRef.current.add(audioCtx);
-      const source = audioCtx.createMediaStreamSource(stream);
-      const processor = audioCtx.createScriptProcessor(4096, 1, 1);
-      
-      processor.onaudioprocess = (e) => {
-        const input = e.inputBuffer.getChannelData(0);
-        const pcm16 = new Int16Array(input.length);
-        for (let i = 0; i < input.length; i++) pcm16[i] = input[i] * 0x7FFF;
-        const b64 = btoa(String.fromCharCode(...new Uint8Array(pcm16.buffer)));
-        
-        if (socketRef.current?.readyState === WebSocket.OPEN) {
-          socketRef.current.send(JSON.stringify({ type: 'audio_chunk', data: b64 }));
-        }
-      };
-      source.connect(processor);
-      processor.connect(audioCtx.destination);
-
-      micCtxRef.current = audioCtx;
-      micProcessorRef.current = processor;
-      micSourceRef.current = source;
-    } catch (err) {
-      console.error("Mic Hook Error:", err);
-    }
+    const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+    const source = audioCtx.createMediaStreamSource(stream);
+    const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+    processor.onaudioprocess = (e) => {
+      const input = e.inputBuffer.getChannelData(0);
+      const pcm16 = new Int16Array(input.length);
+      for (let i = 0; i < input.length; i++) pcm16[i] = input[i] * 0x7FFF;
+      const b64 = btoa(String.fromCharCode(...new Uint8Array(pcm16.buffer)));
+      if (socketRef.current?.readyState === WebSocket.OPEN) {
+        socketRef.current.send(JSON.stringify({ type: 'audio_chunk', data: b64 }));
+      }
+    };
+    source.connect(processor);
+    processor.connect(audioCtx.destination);
   }, []);
 
   const disconnect = useCallback(() => {
     disposedRef.current = true;
     if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
-    frameIntervalRef.current = null;
     socketRef.current?.close();
-    socketRef.current = null;
-    // Close playback audio context
-    if (audioCtxRef.current) {
-      audioCtxRef.current.close();
-      audioCtxRef.current = null;
-    }
-    // Disconnect current mic nodes
-    if (micProcessorRef.current) {
-      micProcessorRef.current.disconnect();
-      micProcessorRef.current = null;
-    }
-    if (micSourceRef.current) {
-      micSourceRef.current.disconnect();
-      micSourceRef.current = null;
-    }
-    if (micCtxRef.current) {
-      micCtxRef.current.close();
-      micCtxRef.current = null;
-    }
-    // Kill ALL mic audio contexts ever created (handles Strict Mode duplicates)
-    allMicCtxsRef.current.forEach(ctx => {
-      try { ctx.close(); } catch (_) {}
-    });
-    allMicCtxsRef.current.clear();
+    if (audioCtxRef.current) audioCtxRef.current.close();
   }, []);
 
-  const sendPrompt = useCallback((text: string) => {
-    if (socketRef.current?.readyState === WebSocket.OPEN) {
-      socketRef.current.send(JSON.stringify({ type: 'user_prompt', text }));
-    }
-  }, []);
+  const sendPrompt = (text: string) => {
+    socketRef.current?.send(JSON.stringify({ type: 'user_prompt', text }));
+  }
 
   return { status, connect, disconnect, sendPrompt, startMicrophone };
 }
