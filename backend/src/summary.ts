@@ -6,7 +6,7 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
+const ANTHROPIC_API_KEY = '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';
 if (!ANTHROPIC_API_KEY) console.warn('⚠️ ANTHROPIC_API_KEY not set in environment');
 
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
@@ -135,7 +135,7 @@ app.post('/summarize', async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 8081;
+const PORT = process.env.SUMMARY_PORT || 8082;
 app.listen(PORT, () => {
   console.log(`📋 Summary server running on port ${PORT}`);
 });

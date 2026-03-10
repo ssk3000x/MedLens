@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback, useRef } from "react"
 import { Square, AlertTriangle, Loader2 } from "lucide-react"
 import { useLiveAgent } from "@/hooks/use-live-agent"
 
-const BACKEND_URL = 'http://localhost:8081'
+const BACKEND_URL = 'http://localhost:8082'
 
 export function SessionView({ onStop }: { onStop: (summary?: any) => void }) {
   const [currentMessage, setCurrentMessage] = useState("")
