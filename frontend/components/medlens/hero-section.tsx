@@ -53,8 +53,8 @@ export function HeroSection({ onStart }: { onStart?: () => void }) {
 
 function FeaturePill({ icon, label }: { icon: React.ReactNode; label: string }) {
   return (
-    <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-card border border-border text-sm text-muted-foreground">
-      <span className="text-primary">{icon}</span>
+    <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-yellow-50 border border-yellow-200 text-sm text-black">
+      <span className="text-black">{icon}</span>
       {label}
     </div>
   )

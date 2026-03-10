@@ -1,14 +1,30 @@
 @import 'tailwindcss';
 @import 'tw-animate-css';
 
+:root {
+  --font-display: var(--font-lora), Georgia, serif;
+  --font-body: var(--font-dm-sans), system-ui, sans-serif;
+}
+
+body {
+  font-family: var(--font-body);
+}
+
+h1, h2, h3 {
+  font-family: var(--font-display);
+}
+
+.font-display { font-family: var(--font-display); }
+.font-sans    { font-family: var(--font-body); }
+
 @custom-variant dark (&:is(.dark *));
 
 :root {
-  --background: oklch(0.985 0.002 200);
+  --background: oklch(0.955 0.022 82);
   --foreground: oklch(0.17 0.02 240);
-  --card: oklch(1 0 0);
+  --card: oklch(0.968 0.016 80);
   --card-foreground: oklch(0.17 0.02 240);
-  --popover: oklch(1 0 0);
+  --popover: oklch(0.968 0.016 80);
   --popover-foreground: oklch(0.17 0.02 240);
   --primary: oklch(0.55 0.14 180);
   --primary-foreground: oklch(0.99 0.002 200);
@@ -20,8 +36,8 @@
   --accent-foreground: oklch(0.99 0.002 200);
   --destructive: oklch(0.577 0.245 27.325);
   --destructive-foreground: oklch(0.577 0.245 27.325);
-  --border: oklch(0.91 0.01 200);
-  --input: oklch(0.91 0.01 200);
+  --border: oklch(0.89 0.018 82);
+  --input: oklch(0.89 0.018 82);
   --ring: oklch(0.55 0.14 180);
   --chart-1: oklch(0.55 0.14 180);
   --chart-2: oklch(0.6 0.118 184.704);
@@ -29,13 +45,13 @@
   --chart-4: oklch(0.828 0.189 84.429);
   --chart-5: oklch(0.769 0.188 70.08);
   --radius: 0.75rem;
-  --sidebar: oklch(0.985 0.002 200);
+  --sidebar: oklch(0.960 0.018 82);
   --sidebar-foreground: oklch(0.17 0.02 240);
   --sidebar-primary: oklch(0.55 0.14 180);
   --sidebar-primary-foreground: oklch(0.99 0.002 200);
   --sidebar-accent: oklch(0.96 0.01 200);
   --sidebar-accent-foreground: oklch(0.25 0.03 240);
-  --sidebar-border: oklch(0.91 0.01 200);
+  --sidebar-border: oklch(0.89 0.018 82);
   --sidebar-ring: oklch(0.55 0.14 180);
   --warning: oklch(0.75 0.15 70);
   --warning-foreground: oklch(0.30 0.08 60);
@@ -83,7 +99,8 @@
 }
 
 @theme inline {
-  --font-sans: 'Inter', 'Inter Fallback', sans-serif;
+  /* ── KEY FIX: swap Inter → DM Sans so Tailwind's font-sans uses the new font ── */
+  --font-sans: var(--font-dm-sans), system-ui, sans-serif;
   --font-mono: 'Geist Mono', 'Geist Mono Fallback';
   --color-background: var(--background);
   --color-foreground: var(--foreground);

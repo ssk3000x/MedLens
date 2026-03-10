@@ -132,18 +132,6 @@ export function SessionView({ onStop }: { onStop: (summary?: any) => void }) {
 
         <div className="flex gap-4">
           <button 
-            onClick={() => {
-              const prompt = "Describe what you see and check for medications."
-              setCurrentMessage("Analyzing...")
-              addToTranscript({ speaker: 'user', text: prompt })
-              sendPrompt(prompt)
-            }}
-            className="bg-blue-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-blue-500"
-          >
-            Identify Medication
-          </button>
-          
-          <button 
             disabled={isStopping}
             onClick={async () => {
               setIsStopping(true)
