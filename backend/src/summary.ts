@@ -6,8 +6,8 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const ANTHROPIC_API_KEY = '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';
-if (!ANTHROPIC_API_KEY) console.warn('⚠️ ANTHROPIC_API_KEY not set in environment');
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+if (!ANTHROPIC_API_KEY) console.warn('⚠️ ANTHROPIC_API_KEY not set in environment (read from .env)');
 
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
