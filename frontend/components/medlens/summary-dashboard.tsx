@@ -1,5 +1,6 @@
 "use client"
 
+import { useState } from "react"
 import {
   Mail,
   FileText,
@@ -12,6 +13,15 @@ import {
   ArrowLeft,
   Clock,
 } from "lucide-react"
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+  DialogClose,
+} from "@/components/ui/dialog"
 
 const defaultMedications = [
   { name: "N/A", type: "N/A", purpose: "N/A", dosage: "N/A", status: "safe" as const },
@@ -44,6 +54,12 @@ const schedule = [
 ]
 
 export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summary?: any }) {
+  const [phoneDialogOpen, setPhoneDialogOpen] = useState(false)
+  const [phoneNumber, setPhoneNumber] = useState("")
+  const [deploying, setDeploying] = useState(false)
+  const [deployed, setDeployed] = useState(false)
+  const [deployError, setDeployError] = useState<string | null>(null)
+
   // runtime-provided summary (from SessionView) overrides static content when present
   const runtimeMeds = summary?.medications || null
   const runtimeSummaryRaw = summary?.aiSummary || summary?.summaryText || null
@@ -136,6 +152,7 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
                 </div>
               </details>
             )}
+            <DeployVoiceAgentButton deployed={deployed} onClick={() => { if (!deployed) setPhoneDialogOpen(true) }} />
           </div>
         ) : (
           <div className="flex flex-col items-center gap-3 p-8 rounded-2xl bg-primary/5 border border-primary/20">
@@ -148,6 +165,7 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
             <p className="text-sm text-muted-foreground text-center max-w-md">
               All 3 detected medications have been cross-checked against FDA databases. One minor note was flagged for your awareness.
             </p>
+            <DeployVoiceAgentButton deployed={deployed} onClick={() => { if (!deployed) setPhoneDialogOpen(true) }} />
           </div>
         )}
 
@@ -296,6 +314,77 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
             />
           </div>
         </section>
+
+        {/* Deploy Gemini Voice Agent Dialog */}
+        <Dialog open={phoneDialogOpen} onOpenChange={setPhoneDialogOpen}>
+          <DialogContent className="sm:max-w-md">
+            <DialogHeader>
+              <DialogTitle>Deploy Gemini Voice Agent</DialogTitle>
+              <DialogDescription>
+                Enter a phone number to deploy the Gemini voice agent. It will call to provide medication reminders and answer questions about your session.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="flex flex-col gap-3 py-4">
+              <label htmlFor="phone-number" className="text-sm font-medium text-foreground">
+                Phone Number
+              </label>
+              <input
+                id="phone-number"
+                type="tel"
+                placeholder="+1 (555) 123-4567"
+                value={phoneNumber}
+                onChange={(e) => setPhoneNumber(e.target.value)}
+                className="flex h-10 w-full rounded-md border border-border bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              />
+            </div>
+            <DialogFooter className="gap-2">
+              <DialogClose asChild>
+                <button className="px-4 py-2 rounded-md border border-border text-sm font-medium hover:bg-muted transition-colors cursor-pointer">
+                  Cancel
+                </button>
+              </DialogClose>
+              <button
+                disabled={!phoneNumber.trim() || deploying}
+                onClick={async () => {
+                  setDeploying(true)
+                  setDeployError(null)
+                  try {
+                    const medsList = (runtimeMeds ?? [])
+                      .filter((m: any) => m.name && m.name !== 'N/A')
+                      .map((m: any) => `${m.name} (${m.dosage}) - ${m.purpose}`)
+                      .join('\n')
+                    const sessionSummary = [
+                      summaryBullets.length > 0 ? 'Session Findings:\n' + summaryBullets.join('\n') : '',
+                      medsList ? '\nDetected Medications:\n' + medsList : '',
+                    ].filter(Boolean).join('\n') || 'No session summary available.'
+                    const res = await fetch("http://localhost:8083/deploy-voice-agent", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ phoneNumber: phoneNumber.trim(), sessionSummary }),
+                    })
+                    if (res.ok) {
+                      setDeployed(true)
+                      setPhoneDialogOpen(false)
+                    } else {
+                      const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }))
+                      setDeployError(err.error || `Request failed (${res.status})`)
+                    }
+                  } catch (e: any) {
+                    setDeployError(e.message || 'Network error — is the VAPI server running on port 8083?')
+                  } finally {
+                    setDeploying(false)
+                  }
+                }}
+                className="px-4 py-2 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+              >
+                {deploying ? "Deploying…" : "Deploy Agent"}
+              </button>
+              {deployError && (
+                <p className="text-xs text-red-500 mt-2 col-span-full">{deployError}</p>
+              )}
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </main>
     </div>
   )
@@ -306,15 +395,18 @@ function ActionCard({
   title,
   description,
   disabled = false,
+  onClick,
 }: {
   icon: React.ReactNode
   title: string
   description: string
   disabled?: boolean
+  onClick?: () => void
 }) {
   return (
     <button
       disabled={disabled}
+      onClick={onClick}
       className={`flex items-start gap-4 p-5 rounded-xl border text-left transition-all cursor-pointer ${
         disabled
           ? "border-border bg-muted opacity-50 cursor-not-allowed"
@@ -341,6 +433,34 @@ function ActionCard({
           </span>
         )}
       </div>
+    </button>
+  )
+}
+
+function GeminiIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path
+        d="M12 2C12 2 14.5 7.5 17.5 10.5C20.5 13.5 24 12 24 12C24 12 20.5 14.5 17.5 17.5C14.5 20.5 12 22 12 22C12 22 9.5 16.5 6.5 13.5C3.5 10.5 0 12 0 12C0 12 3.5 9.5 6.5 6.5C9.5 3.5 12 2 12 2Z"
+        fill="currentColor"
+      />
+    </svg>
+  )
+}
+
+function DeployVoiceAgentButton({ deployed, onClick }: { deployed: boolean; onClick: () => void }) {
+  return (
+    <button
+      disabled={deployed}
+      onClick={onClick}
+      className={`mt-3 flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer ${
+        deployed
+          ? "bg-primary/10 text-primary cursor-default"
+          : "bg-primary/10 text-primary hover:bg-primary/20"
+      }`}
+    >
+      <GeminiIcon className="size-3.5" />
+      {deployed ? "Voice Agent Deployed ✓" : "Deploy Gemini Voice Agent"}
     </button>
   )
 }

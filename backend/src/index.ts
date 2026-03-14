@@ -4,10 +4,13 @@ import http from 'http';
 import dotenv from 'dotenv';
 import admin from 'firebase-admin';
 import { google } from 'googleapis';
+import cors from 'cors';
 
 dotenv.config();
 
 const app = express();
+app.use(cors());
+app.use(express.json());
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
@@ -102,7 +105,11 @@ wss.on('connection', (ws: any) => {
                     }
                   ]
                 }],
-                generation_config: { response_modalities: ["audio"] },
+                generation_config: {
+                  response_modalities: ["audio"],
+                  output_audio_transcription: {},
+                  input_audio_transcription: {}
+                },
                 system_instruction: {
                   role: "system",
                   parts: [{ text: SYSTEM_PROMPT + fitContext }] // <--- INJECTED HERE
@@ -139,6 +146,14 @@ wss.on('connection', (ws: any) => {
                   if (part.inlineData) safeSend(ws, { type: 'agent_speech_chunk', data: part.inlineData.data });
                   if (part.text) safeSend(ws, { type: 'agent_speech_text', text: part.text });
                 }
+              }
+              // Output audio transcription (what the agent said, as text)
+              if (res.serverContent?.outputTranscription?.text) {
+                safeSend(ws, { type: 'agent_speech_text', text: res.serverContent.outputTranscription.text });
+              }
+              // Input audio transcription (what the user said, as text)
+              if (res.serverContent?.inputTranscription?.text) {
+                safeSend(ws, { type: 'user_speech_text', text: res.serverContent.inputTranscription.text });
               }
               if (res.serverContent?.turnComplete) safeSend(ws, { type: 'agent_speech_end' });
             } catch (e) { console.error('Gemini Logic Error:', e); }

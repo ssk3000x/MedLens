@@ -17,7 +17,14 @@ export function SessionView({ onStop }: { onStop: (summary?: any) => void }) {
   const activeStreamRef = useRef<MediaStream | null>(null)
 
   const addToTranscript = useCallback((entry: { speaker: 'user' | 'agent'; text: string }) => {
-    transcriptRef.current = [...transcriptRef.current, entry]
+    const current = transcriptRef.current
+    const last = current[current.length - 1]
+    // Consolidate consecutive messages from the same speaker (streaming chunks)
+    if (last && last.speaker === entry.speaker) {
+      last.text += ' ' + entry.text
+    } else {
+      transcriptRef.current = [...current, { ...entry }]
+    }
   }, [])
 
   const handleAgentMessage = useCallback((msg: string) => {
@@ -26,7 +33,11 @@ export function SessionView({ onStop }: { onStop: (summary?: any) => void }) {
     setIsListening(true)
   }, [addToTranscript])
 
-  const { connect, disconnect, sendPrompt, startMicrophone } = useLiveAgent(handleAgentMessage)
+  const handleUserSpeech = useCallback((msg: string) => {
+    addToTranscript({ speaker: 'user', text: msg })
+  }, [addToTranscript])
+
+  const { connect, disconnect, sendPrompt, startMicrophone } = useLiveAgent(handleAgentMessage, handleUserSpeech)
 
   const connectRef = useRef(connect)
   const disconnectRef = useRef(disconnect)
@@ -147,7 +158,7 @@ export function SessionView({ onStop }: { onStop: (summary?: any) => void }) {
               console.log('📤 Sending transcript to backend:', currentTranscript.length, 'messages')
 
               try {
-                const res = await fetch(`${BACKEND_URL}/summarize`, {
+                const res = await fetch('/api/summarize', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({ transcript: currentTranscript }),

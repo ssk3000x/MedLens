@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback } from 'react';
 
-export function useLiveAgent(onMessage?: (msg: string) => void) {
+export function useLiveAgent(onMessage?: (msg: string) => void, onUserSpeech?: (msg: string) => void) {
   const [status, setStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
   const socketRef = useRef<WebSocket | null>(null);
   const frameIntervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -90,6 +90,8 @@ export function useLiveAgent(onMessage?: (msg: string) => void) {
           nextAudioStartTimeRef.current = startTime + buffer.duration;
         } else if (data.type === 'agent_speech_text' && onMessage) {
           onMessage(data.text);
+        } else if (data.type === 'user_speech_text' && onUserSpeech) {
+          onUserSpeech(data.text);
         }
       } catch (e) { console.error("Socket Message Error:", e); }
     };
@@ -99,7 +101,7 @@ export function useLiveAgent(onMessage?: (msg: string) => void) {
       if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
     };
     socketRef.current = socket;
-  }, [onMessage]);
+  }, [onMessage, onUserSpeech]);
 
   const startMicrophone = useCallback(async (stream: MediaStream) => {
     const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
