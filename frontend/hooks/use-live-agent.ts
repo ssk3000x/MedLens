@@ -15,6 +15,8 @@ export function useLiveAgent(
   const streamRef = useRef<MediaStream | null>(null);
   const nextAudioStartTimeRef = useRef<number>(0);
   const disposedRef = useRef(false);
+  const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
+  const isInterruptedRef = useRef(false);
 
   const connect = useCallback(async (videoElement?: HTMLVideoElement) => {
     if (socketRef.current?.readyState === WebSocket.OPEN || socketRef.current?.readyState === WebSocket.CONNECTING) return;
@@ -79,6 +81,8 @@ export function useLiveAgent(
       try {
         const data = JSON.parse(event.data);
         if (data.type === 'agent_speech_chunk') {
+          // Discard audio that arrives after user interrupted
+          if (isInterruptedRef.current) return;
           const binary = atob(data.data);
           const bytes = new Int16Array(new Uint8Array(binary.split('').map(c => c.charCodeAt(0))).buffer);
           if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
@@ -96,8 +100,16 @@ export function useLiveAgent(
           const startTime = Math.max(nextAudioStartTimeRef.current, audioCtx.currentTime);
           source.start(startTime);
           nextAudioStartTimeRef.current = startTime + buffer.duration;
+          // Track source for interruption
+          activeSourcesRef.current.push(source);
+          source.onended = () => {
+            activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== source);
+          };
         } else if (data.type === 'agent_speech_text' && onMessage) {
           onMessage(data.text);
+        } else if (data.type === 'agent_speech_end') {
+          // Turn complete — allow audio playback for next turn
+          isInterruptedRef.current = false;
         } else if (data.type === 'user_speech_text' && onUserSpeech) {
           onUserSpeech(data.text);
         } else if (data.type === 'email_needed' && onEmailNeeded) {
@@ -124,6 +136,17 @@ export function useLiveAgent(
       micProcessorRef.current = processor;
       processor.onaudioprocess = (e) => {
         const input = e.inputBuffer.getChannelData(0);
+        // Voice Activity Detection: interrupt agent when user speaks
+        let sumSq = 0;
+        for (let i = 0; i < input.length; i++) sumSq += input[i] * input[i];
+        const rms = Math.sqrt(sumSq / input.length);
+        if (rms > 0.02 && activeSourcesRef.current.length > 0) {
+          // User is speaking while agent audio is playing — interrupt
+          activeSourcesRef.current.forEach(s => { try { s.stop(); } catch (_) {} });
+          activeSourcesRef.current = [];
+          nextAudioStartTimeRef.current = 0;
+          isInterruptedRef.current = true;
+        }
         const pcm16 = new Int16Array(input.length);
         for (let i = 0; i < input.length; i++) pcm16[i] = input[i] * 0x7FFF;
         const b64 = btoa(String.fromCharCode(...new Uint8Array(pcm16.buffer)));
@@ -156,7 +179,10 @@ export function useLiveAgent(
       micAudioCtxRef.current = null;
     }
     
-    // Close playback audio context
+    // Stop all queued playback sources and close context
+    activeSourcesRef.current.forEach(s => { try { s.stop(); } catch (_) {} });
+    activeSourcesRef.current = [];
+    isInterruptedRef.current = false;
     if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') {
       audioCtxRef.current.close().catch(() => {});
       audioCtxRef.current = null;
