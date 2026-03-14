@@ -3,9 +3,34 @@ import bodyParser from 'body-parser';
 import cors from 'cors';
 import Anthropic from '@anthropic-ai/sdk';
 import dotenv from 'dotenv';
+import * as admin from 'firebase-admin';
 
 dotenv.config();
 
+// ── Firebase init ──────────────────────────────────────────────────────────
+let db: admin.firestore.Firestore | null = null;
+
+if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+  try {
+    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+    if (!admin.apps.some((a) => a?.name === 'summary-server')) {
+      const firebaseApp = admin.initializeApp(
+        { credential: admin.credential.cert(serviceAccount) },
+        'summary-server'
+      );
+      db = admin.firestore(firebaseApp);
+    } else {
+      db = admin.firestore(admin.app('summary-server'));
+    }
+    console.log('🔥 Firestore connected (summary server)');
+  } catch (e) {
+    console.error('⚠️  Firestore init failed:', e);
+  }
+} else {
+  console.warn('⚠️  FIREBASE_SERVICE_ACCOUNT_JSON not set — Firestore disabled');
+}
+
+// ── Anthropic init ─────────────────────────────────────────────────────────
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY || 'empty_key' });
 
@@ -35,18 +60,18 @@ app.post('/summarize', async (req, res) => {
 
   try {
     const message = await anthropic.messages.create({
-      model: 'claude-3-haiku-20240307', 
+      model: 'claude-3-haiku-20240307',
       max_tokens: 1024,
       system: SYSTEM_PROMPT,
-      messages:[{ role: 'user', content: `Analyze this transcript strictly:\n\n${transcriptText}` }],
+      messages: [{ role: 'user', content: `Analyze this transcript strictly:\n\n${transcriptText}` }],
     });
 
     const raw = message.content.filter((b) => b.type === 'text').map((b: any) => b.text).join('').trim();
-    let summary = "Summary generated.";
+    let summary: string = 'Summary generated.';
     let medications = [
-        { name: 'N/A (1)', type: 'N/A', purpose: 'N/A', dosage: 'N/A', status: 'safe' as const },
-        { name: 'N/A (2)', type: 'N/A', purpose: 'N/A', dosage: 'N/A', status: 'safe' as const },
-        { name: 'N/A (3)', type: 'N/A', purpose: 'N/A', dosage: 'N/A', status: 'safe' as const },
+      { name: 'N/A (1)', type: 'N/A', purpose: 'N/A', dosage: 'N/A', status: 'safe' as const },
+      { name: 'N/A (2)', type: 'N/A', purpose: 'N/A', dosage: 'N/A', status: 'safe' as const },
+      { name: 'N/A (3)', type: 'N/A', purpose: 'N/A', dosage: 'N/A', status: 'safe' as const },
     ];
 
     try {
@@ -58,9 +83,27 @@ app.post('/summarize', async (req, res) => {
       summary = raw;
     }
 
+    // ── Firestore write ────────────────────────────────────────────────────
+    if (db) {
+      try {
+        const sessionId = String(Date.now());
+        await db.collection('sessions').doc(sessionId).set({
+          sessionId,
+          summary,
+          medications,
+          timestamp: admin.firestore.FieldValue.serverTimestamp(),
+          method: 'claude',
+        });
+        console.log(`✅ Session saved to Firestore: ${sessionId}`);
+      } catch (e) {
+        console.error('⚠️  Firestore write failed:', e);
+      }
+    }
+    // ──────────────────────────────────────────────────────────────────────
+
     res.json({ summary, medications, method: 'claude' });
   } catch (err: any) {
-    res.json({ summary: "AI failed to summarize.", medications: [], method: 'error' });
+    res.json({ summary: 'AI failed to summarize.', medications: [], method: 'error' });
   }
 });
 
