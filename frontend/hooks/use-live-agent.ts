@@ -1,10 +1,18 @@
 import { useState, useRef, useCallback } from 'react';
 
-export function useLiveAgent(onMessage?: (msg: string) => void, onUserSpeech?: (msg: string) => void) {
+export function useLiveAgent(
+  onMessage?: (msg: string) => void,
+  onUserSpeech?: (msg: string) => void,
+  onEmailNeeded?: (suggestedEmail: string, subject: string) => void
+) {
   const [status, setStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
   const socketRef = useRef<WebSocket | null>(null);
   const frameIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
+  const micAudioCtxRef = useRef<AudioContext | null>(null);
+  const micProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
   const nextAudioStartTimeRef = useRef<number>(0);
   const disposedRef = useRef(false);
 
@@ -14,15 +22,14 @@ export function useLiveAgent(onMessage?: (msg: string) => void, onUserSpeech?: (
     disposedRef.current = false;
     setStatus('connecting');
 
-    // 1. Parallel Fetch: Get OAuth tokens AND the Health Summary
     let accessToken: string | null = null;
     let refreshToken: string | null = null;
     let fitSummary: any = null;
 
     try {
-      const [tokenRes, fitRes] = await Promise.all([
+      const[tokenRes, fitRes] = await Promise.all([
         fetch('/api/auth/token'),
-        fetch('/api/fitness/summary', { signal: AbortSignal.timeout(3000) }) // 3s timeout
+        fetch('/api/fitness/summary', { signal: AbortSignal.timeout(3000) }) 
       ]);
 
       if (tokenRes.ok) {
@@ -35,7 +42,7 @@ export function useLiveAgent(onMessage?: (msg: string) => void, onUserSpeech?: (
         fitSummary = f.fitSummary;
       }
     } catch (e) {
-      console.warn('Pre-flight data fetch failed, proceeding with defaults:', e);
+      console.warn('Pre-flight data fetch failed, proceeding with defaults');
     }
 
     const socket = new WebSocket('wss://medlens-backend-88029418749.us-central1.run.app');
@@ -44,13 +51,12 @@ export function useLiveAgent(onMessage?: (msg: string) => void, onUserSpeech?: (
       if (disposedRef.current) { socket.close(); return; }
       setStatus('connected');
       
-      // 2. Send everything in the start message
       socket.send(JSON.stringify({ 
         type: 'session_start', 
         sessionId: 'hack-' + Date.now(),
         accessToken,
         refreshToken,
-        fitSummary // <--- Injected Health Data
+        fitSummary
       }));
       
       if (videoElement) {
@@ -75,7 +81,9 @@ export function useLiveAgent(onMessage?: (msg: string) => void, onUserSpeech?: (
         if (data.type === 'agent_speech_chunk') {
           const binary = atob(data.data);
           const bytes = new Int16Array(new Uint8Array(binary.split('').map(c => c.charCodeAt(0))).buffer);
-          if (!audioCtxRef.current) audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+          if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
+            audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+          }
           const audioCtx = audioCtxRef.current;
           if (audioCtx.state === 'suspended') audioCtx.resume();
           const floats = new Float32Array(bytes.length);
@@ -92,6 +100,8 @@ export function useLiveAgent(onMessage?: (msg: string) => void, onUserSpeech?: (
           onMessage(data.text);
         } else if (data.type === 'user_speech_text' && onUserSpeech) {
           onUserSpeech(data.text);
+        } else if (data.type === 'email_needed' && onEmailNeeded) {
+          onEmailNeeded(data.suggestedEmail || '', data.subject || '');
         }
       } catch (e) { console.error("Socket Message Error:", e); }
     };
@@ -101,35 +111,86 @@ export function useLiveAgent(onMessage?: (msg: string) => void, onUserSpeech?: (
       if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
     };
     socketRef.current = socket;
-  }, [onMessage, onUserSpeech]);
+  },[onMessage, onUserSpeech, onEmailNeeded]);
 
   const startMicrophone = useCallback(async (stream: MediaStream) => {
-    const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-    const source = audioCtx.createMediaStreamSource(stream);
-    const processor = audioCtx.createScriptProcessor(4096, 1, 1);
-    processor.onaudioprocess = (e) => {
-      const input = e.inputBuffer.getChannelData(0);
-      const pcm16 = new Int16Array(input.length);
-      for (let i = 0; i < input.length; i++) pcm16[i] = input[i] * 0x7FFF;
-      const b64 = btoa(String.fromCharCode(...new Uint8Array(pcm16.buffer)));
-      if (socketRef.current?.readyState === WebSocket.OPEN) {
-        socketRef.current.send(JSON.stringify({ type: 'audio_chunk', data: b64 }));
-      }
-    };
-    source.connect(processor);
-    processor.connect(audioCtx.destination);
-  }, []);
+    streamRef.current = stream;
+    try {
+      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+      micAudioCtxRef.current = audioCtx;
+      const source = audioCtx.createMediaStreamSource(stream);
+      micSourceRef.current = source;
+      const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+      micProcessorRef.current = processor;
+      processor.onaudioprocess = (e) => {
+        const input = e.inputBuffer.getChannelData(0);
+        const pcm16 = new Int16Array(input.length);
+        for (let i = 0; i < input.length; i++) pcm16[i] = input[i] * 0x7FFF;
+        const b64 = btoa(String.fromCharCode(...new Uint8Array(pcm16.buffer)));
+        if (socketRef.current?.readyState === WebSocket.OPEN) {
+          socketRef.current.send(JSON.stringify({ type: 'audio_chunk', data: b64 }));
+        }
+      };
+      source.connect(processor);
+      processor.connect(audioCtx.destination);
+    } catch (e) { console.warn("Mic init failed", e); }
+  },[]);
 
   const disconnect = useCallback(() => {
     disposedRef.current = true;
-    if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
+    if (frameIntervalRef.current) { clearInterval(frameIntervalRef.current); frameIntervalRef.current = null; }
     socketRef.current?.close();
-    if (audioCtxRef.current) audioCtxRef.current.close();
-  }, []);
+    
+    // Kill the processor callback first to stop it from holding things alive
+    if (micProcessorRef.current) {
+      micProcessorRef.current.onaudioprocess = null;
+      try { micProcessorRef.current.disconnect(); } catch (e) {}
+      micProcessorRef.current = null;
+    }
+    if (micSourceRef.current) {
+      try { micSourceRef.current.disconnect(); } catch (e) {}
+      micSourceRef.current = null;
+    }
+    if (micAudioCtxRef.current && micAudioCtxRef.current.state !== 'closed') {
+      micAudioCtxRef.current.close().catch(() => {});
+      micAudioCtxRef.current = null;
+    }
+    
+    // Close playback audio context
+    if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') {
+      audioCtxRef.current.close().catch(() => {});
+      audioCtxRef.current = null;
+    }
+
+    // NUCLEAR: Stop all tracks on the stream directly from the hook
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(t => {
+        try { t.stop(); } catch (e) {}
+      });
+      streamRef.current = null;
+    }
+  },[]);
 
   const sendPrompt = (text: string) => {
-    socketRef.current?.send(JSON.stringify({ type: 'user_prompt', text }));
+    if (socketRef.current?.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({ type: 'user_prompt', text }));
+    }
   }
 
-  return { status, connect, disconnect, sendPrompt, startMicrophone };
+  const sendEmailResponse = async (email: string) => {
+    if (socketRef.current?.readyState === WebSocket.OPEN) {
+      // Fetch a fresh access token before sending
+      let freshToken: string | null = null;
+      try {
+        const res = await fetch('/api/auth/token');
+        if (res.ok) {
+          const t = await res.json();
+          freshToken = t.accessToken;
+        }
+      } catch (e) {}
+      socketRef.current.send(JSON.stringify({ type: 'email_response', email, accessToken: freshToken }));
+    }
+  }
+
+  return { status, connect, disconnect, sendPrompt, sendEmailResponse, startMicrophone };
 }

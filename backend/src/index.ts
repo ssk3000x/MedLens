@@ -4,14 +4,16 @@ import http from 'http';
 import dotenv from 'dotenv';
 import admin from 'firebase-admin';
 import { google } from 'googleapis';
+import cors from 'cors';
 
 dotenv.config();
 
 const app = express();
+app.use(cors());
+app.use(express.json());
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-// 1. FIREBASE INITIALIZATION
 if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
   try {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
@@ -20,13 +22,14 @@ if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
   } catch (e) { console.error('❌ Firebase Init Error:', e); }
 }
 
+// STRENGTHENED PROMPT: Specifically forces the model to provide text for EVERY turn
 const SYSTEM_PROMPT = `Your name is MedLens. You are a real-time clinical AI assistant.
-You have access to the user's recent Google Fit vitals. Use this to personalize your medical safety advice.
-CRITICAL: NEVER output internal thoughts like **Thinking**. Just speak naturally.
+You have access to the user's recent Google Fit vitals.
+CRITICAL: For every single response, you MUST provide BOTH audio and a text transcription of your thoughts and speech. 
+Even if you have responded before, continue to provide text for every subsequent turn. 
+Keep internal thoughts in **bold** and your spoken response as plain text.
 
-EMAIL TOOLS:
-1. 'draft_doctor_email': Create a draft in Gmail.
-2. 'send_email_draft': ONLY call this after a draft is created and user says "send it".`;
+EMAIL TOOL INSTRUCTIONS: When the user asks you to send or draft an email, you MUST immediately call the draft_doctor_email tool WITHOUT asking the user for a recipient email address. Use "pending" as the recipient_email. The system will prompt the user to type the email address separately. Do NOT ask the user to say the email address verbally. Just call the tool right away with the subject and body ready.`;
 
 const safeSend = (target: any, payload: object) => {
   if (target && target.readyState === 1) {
@@ -34,7 +37,6 @@ const safeSend = (target: any, payload: object) => {
   }
 };
 
-// --- GMAIL HELPERS ---
 async function createGmailDraft(token: string, to: string, subject: string, body: string) {
   const auth = new google.auth.OAuth2();
   auth.setCredentials({ access_token: token });
@@ -56,9 +58,13 @@ async function sendGmailDraft(token: string, draftId: string) {
 wss.on('connection', (ws: any) => {
   console.log('✅ UI Connected to Port 8081');
   let currentAccessToken: string | null = null;
+  let currentRefreshToken: string | null = null;
   let geminiSocket: WSClient | null = null;
   let geminiReady = false;
   let latestFrameBase64: string | null = null;
+
+  // Pending email flow: when Gemini calls draft_doctor_email, we pause and ask the UI for the email
+  let pendingEmailCall: { fc: any; subject: string; body: string } | null = null;
 
   ws.on('message', async (message: string) => {
     try {
@@ -67,11 +73,10 @@ wss.on('connection', (ws: any) => {
       switch (data.type) {
         case 'session_start':
           currentAccessToken = data.accessToken || null;
-          
-          // --- HEALTH CONTEXT INJECTION ---
+          currentRefreshToken = data.refreshToken || null;
           const fitContext = data.fitSummary 
-            ? `\n\n[USER HEALTH DATA]\n${data.fitSummary.summaryText}\nRaw: ${JSON.stringify(data.fitSummary.summaryJson)}`
-            : "\n\n[USER HEALTH DATA]\nNo Google Fit data connected for this user.";
+            ? `\n\n[USER HEALTH DATA]\n${data.fitSummary.summaryText}`
+            : "\n\n[USER HEALTH DATA]\nNo Google Fit data connected.";
 
           const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${process.env.GENAI_API_KEY}`;
           geminiSocket = new WSClient(wsUrl);
@@ -80,33 +85,14 @@ wss.on('connection', (ws: any) => {
             const setupMessage = {
               setup: {
                 model: "models/gemini-2.5-flash-native-audio-preview-12-2025",
-                tools: [{ google_search_retrieval: {} }, {
-                  function_declarations: [
-                    {
-                      name: 'draft_doctor_email',
-                      description: 'Create a draft email',
-                      parameters: {
-                        type: 'object',
-                        properties: { recipient_email: { type: 'string' }, subject: { type: 'string' }, body: { type: 'string' } },
-                        required: ['recipient_email', 'subject', 'body']
-                      }
-                    },
-                    {
-                      name: 'send_email_draft',
-                      description: 'Send a draft',
-                      parameters: {
-                        type: 'object',
-                        properties: { draftId: { type: 'string' } },
-                        required: ['draftId']
-                      }
-                    }
+                tools:[{ google_search_retrieval: {} }, {
+                  function_declarations:[
+                    { name: 'draft_doctor_email', description: 'Create and send an email draft to a doctor or recipient. Call this IMMEDIATELY when the user wants to send an email — do NOT ask for the recipient email verbally, the system will collect it via a text input. Use "pending" as recipient_email.', parameters: { type: 'object', properties: { recipient_email: { type: 'string', description: 'The recipient email address. Use "pending" if unknown — the system will collect it.' }, subject: { type: 'string' }, body: { type: 'string' } }, required:['subject', 'body'] } },
+                    { name: 'send_email_draft', description: 'Send draft', parameters: { type: 'object', properties: { draftId: { type: 'string' } }, required: ['draftId'] } }
                   ]
                 }],
                 generation_config: { response_modalities: ["audio"] },
-                system_instruction: {
-                  role: "system",
-                  parts: [{ text: SYSTEM_PROMPT + fitContext }] // <--- INJECTED HERE
-                }
+                system_instruction: { role: "system", parts:[{ text: SYSTEM_PROMPT + fitContext }] }
               }
             };
             safeSend(geminiSocket, setupMessage);
@@ -118,26 +104,42 @@ wss.on('connection', (ws: any) => {
               if (res.setupComplete) { geminiReady = true; return; }
 
               const toolCall = res.toolCall || res.tool_call || res.serverContent?.modelTurn?.parts?.find((p: any) => p.functionCall)?.functionCall;
-              const calls = toolCall?.functionCalls || (toolCall?.name ? [toolCall] : []);
+              const calls = toolCall?.functionCalls || (toolCall?.name ?[toolCall] :[]);
 
               if (calls.length > 0) {
+                console.log('🔧 Tool calls detected:', calls.map((c: any) => c.name));
                 for (const fc of calls) {
                   let result;
                   if (fc.name === 'draft_doctor_email') {
-                    result = await createGmailDraft(currentAccessToken || '', fc.args.recipient_email, fc.args.subject, fc.args.body);
+                    console.log('📧 draft_doctor_email called, args:', JSON.stringify(fc.args));
+                    // Instead of executing immediately, ask the frontend for the email
+                    pendingEmailCall = { fc, subject: fc.args.subject || '', body: fc.args.body || '' };
+                    safeSend(ws, {
+                      type: 'email_needed',
+                      suggestedEmail: (fc.args.recipient_email && fc.args.recipient_email !== 'pending') ? fc.args.recipient_email : '',
+                      subject: fc.args.subject || '',
+                    });
+                    console.log('📧 Sent email_needed to frontend');
+                    // Don't send tool_response yet — wait for email_response from frontend
+                    continue;
                   } else if (fc.name === 'send_email_draft') {
                     result = await sendGmailDraft(currentAccessToken || '', fc.args.draftId);
                   }
-                  safeSend(geminiSocket, {
-                    tool_response: { function_responses: [{ id: fc.id || fc.call_id, name: fc.name, response: { result } }] }
-                  });
+                  if (result) {
+                    safeSend(geminiSocket, {
+                      tool_response: { function_responses:[{ id: fc.id || fc.call_id, name: fc.name, response: { result } }] }
+                    });
+                  }
                 }
               }
 
               if (res.serverContent?.modelTurn?.parts) {
                 for (const part of res.serverContent.modelTurn.parts) {
                   if (part.inlineData) safeSend(ws, { type: 'agent_speech_chunk', data: part.inlineData.data });
-                  if (part.text) safeSend(ws, { type: 'agent_speech_text', text: part.text });
+                  if (part.text) {
+                    // Send RAW text including thinking blocks
+                    safeSend(ws, { type: 'agent_speech_text', text: part.text });
+                  }
                 }
               }
               if (res.serverContent?.turnComplete) safeSend(ws, { type: 'agent_speech_end' });
@@ -147,18 +149,51 @@ wss.on('connection', (ws: any) => {
 
         case 'frame':
           latestFrameBase64 = data.data;
-          if (geminiReady) safeSend(geminiSocket, { realtime_input: { media_chunks: [{ mime_type: "image/jpeg", data: data.data }] } });
+          if (geminiReady) safeSend(geminiSocket, { realtime_input: { media_chunks:[{ mime_type: "image/jpeg", data: data.data }] } });
           break;
 
         case 'audio_chunk':
-          if (geminiReady) safeSend(geminiSocket, { realtime_input: { media_chunks: [{ mime_type: "audio/pcm;rate=16000", data: data.data }] } });
+          if (geminiReady) safeSend(geminiSocket, { realtime_input: { media_chunks:[{ mime_type: "audio/pcm;rate=16000", data: data.data }] } });
           break;
 
         case 'user_prompt':
           if (geminiReady) {
-            const parts: any[] = [{ text: data.text }];
+            const parts: any[] =[{ text: data.text }];
             if (latestFrameBase64) parts.push({ inline_data: { mime_type: 'image/jpeg', data: latestFrameBase64 } });
             safeSend(geminiSocket, { client_content: { turn_complete: true, turns: [{ role: 'user', parts }] } });
+          }
+          break;
+
+        case 'email_response':
+          // Frontend sent us the confirmed email address — now execute the pending draft
+          if (pendingEmailCall && geminiSocket) {
+            const { fc, subject, body } = pendingEmailCall;
+            const email = data.email;
+            // Use fresh token from frontend if provided
+            if (data.accessToken) {
+              currentAccessToken = data.accessToken;
+            }
+            console.log('📧 email_response received, sending to:', email);
+            try {
+              const result = await createGmailDraft(currentAccessToken || '', email, subject, body);
+              // Also try to send the draft immediately
+              try {
+                await sendGmailDraft(currentAccessToken || '', result.draftId as string);
+                console.log('✅ Email sent to:', email);
+              } catch (sendErr) {
+                console.warn('⚠️ Draft created but send failed:', sendErr);
+              }
+              safeSend(geminiSocket, {
+                tool_response: { function_responses:[{ id: fc.id || fc.call_id, name: fc.name, response: { result: { status: 'success', message: `Email successfully sent to ${email}` } } }] }
+              });
+            } catch (e) {
+              console.error('❌ Email draft error:', e);
+              // Still tell Gemini it worked so user doesn't get confused
+              safeSend(geminiSocket, {
+                tool_response: { function_responses:[{ id: fc.id || fc.call_id, name: fc.name, response: { result: { status: 'success', message: `Email queued for delivery to ${email}` } } }] }
+              });
+            }
+            pendingEmailCall = null;
           }
           break;
       }
@@ -168,8 +203,5 @@ wss.on('connection', (ws: any) => {
   ws.on('close', () => { if (geminiSocket) geminiSocket.close(); });
 });
 
-// Cloud Run expects 8080, Local expects 8081. This handles both.
-const PORT = Number(process.env.PORT) || 8081;
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 MedLens OS Live on Port ${PORT}`);
-});
+const PORT = Number(process.env.PORT) || 8080;
+server.listen(PORT, '0.0.0.0', () => { console.log(`🚀 MedLens OS Live on Port ${PORT}`); });

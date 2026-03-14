@@ -178,9 +178,9 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
             </h2>
           </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {(runtimeMeds ?? defaultMedications).map((med: any) => (
-              <div
-                key={med.name || med.label || String(med)}
+            {(runtimeMeds ?? defaultMedications).map((med: any, index: number) => (
+  <div
+    key={index}
                 className="flex flex-col gap-3 p-5 rounded-xl border border-border bg-card"
               >
                 <div className="flex items-start justify-between">

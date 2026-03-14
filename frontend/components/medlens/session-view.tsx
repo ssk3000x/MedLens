@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useState, useCallback, useRef } from "react"
-import { Square, AlertTriangle, Loader2 } from "lucide-react"
+import { Square, AlertTriangle, Loader2, Send, X } from "lucide-react"
 import { useLiveAgent } from "@/hooks/use-live-agent"
 
 const BACKEND_URL = 'http://localhost:8082'
@@ -13,94 +13,125 @@ export function SessionView({ onStop }: { onStop: (summary?: any) => void }) {
   const [isStopping, setIsStopping] = useState(false)
   const [cameraError, setCameraError] = useState<string | null>(null)
   const [sessionTime, setSessionTime] = useState(0)
+  const [showEmailInput, setShowEmailInput] = useState(false)
+  const [emailValue, setEmailValue] = useState("")
+  const [emailSubject, setEmailSubject] = useState("")
+  
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const activeStreamRef = useRef<MediaStream | null>(null)
+  const recognitionRef = useRef<any>(null)
 
   const addToTranscript = useCallback((entry: { speaker: 'user' | 'agent'; text: string }) => {
-    transcriptRef.current = [...transcriptRef.current, entry]
+    if (!entry.text.trim()) return;
+    const current = transcriptRef.current;
+    const last = current[current.length - 1];
+
+    if (last && last.speaker === entry.speaker) {
+      // Append if same speaker, avoiding exact duplicates
+      if (!last.text.includes(entry.text)) {
+        last.text += " " + entry.text;
+      }
+    } else {
+      transcriptRef.current = [...current, { ...entry }];
+    }
   }, [])
 
   const handleAgentMessage = useCallback((msg: string) => {
-    setCurrentMessage((prev) => (prev === "Analyzing..." ? msg : prev + " " + msg))
-    addToTranscript({ speaker: 'agent', text: msg })
-    setIsListening(true)
+    // 1. SAVE RAW (Including **Thinking**)
+    addToTranscript({ speaker: 'agent', text: msg });
+
+    // 2. UI DISPLAY (Only show non-thinking parts to the user)
+    const displayMsg = msg.replace(/\*\*[\s\S]*?\*\*/g, '').trim();
+    if (displayMsg) {
+      setCurrentMessage((prev) => (prev === "Analyzing..." ? displayMsg : prev + " " + displayMsg));
+      setIsListening(true);
+    }
   }, [addToTranscript])
 
-  const { connect, disconnect, sendPrompt, startMicrophone } = useLiveAgent(handleAgentMessage)
+  const handleUserSpeech = useCallback((msg: string) => {
+    addToTranscript({ speaker: 'user', text: msg })
+  }, [addToTranscript])
 
-  const connectRef = useRef(connect)
-  const disconnectRef = useRef(disconnect)
-  const startMicRef = useRef(startMicrophone)
-  connectRef.current = connect
-  disconnectRef.current = disconnect
-  startMicRef.current = startMicrophone
+  const handleEmailNeeded = useCallback((suggestedEmail: string, subject: string) => {
+    console.log('📧 email_needed received:', suggestedEmail, subject);
+    setEmailValue(suggestedEmail);
+    setEmailSubject(subject);
+    setShowEmailInput(true);
+  }, [])
+
+  const { connect, disconnect, sendPrompt, sendEmailResponse, startMicrophone } = useLiveAgent(handleAgentMessage, handleUserSpeech, handleEmailNeeded)
+
+  const startSpeechRecognition = useCallback(() => {
+    const SpeechRecognition = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition
+    if (!SpeechRecognition) return
+    try {
+      const rec = new SpeechRecognition()
+      rec.continuous = true; rec.interimResults = false; rec.lang = 'en-US';
+      rec.onresult = (ev: any) => {
+        for (let i = ev.resultIndex; i < ev.results.length; i++) {
+          if (ev.results[i].isFinal) {
+            const text = ev.results[i][0]?.transcript?.trim()
+            if (text) handleUserSpeech(text)
+          }
+        }
+      }
+      rec.start(); recognitionRef.current = rec;
+    } catch (e) {}
+  }, [handleUserSpeech])
 
   const stopAllMedia = useCallback(() => {
-    // Kill active stream tracks
+    if (recognitionRef.current) { try { recognitionRef.current.stop() } catch (e) {} recognitionRef.current = null; }
     if (activeStreamRef.current) {
-      activeStreamRef.current.getTracks().forEach(t => { t.stop(); t.enabled = false })
-      activeStreamRef.current = null
+      activeStreamRef.current.getTracks().forEach(t => {
+        try { (t as any).applyConstraints({ advanced: [{ torch: false }] }); } catch (e) {}
+        t.stop();
+      });
+      activeStreamRef.current = null;
     }
-    // Detach video element
     if (videoRef.current) {
-      videoRef.current.pause()
-      videoRef.current.srcObject = null
+      const stream = videoRef.current.srcObject as MediaStream;
+      if (stream) { stream.getTracks().forEach(t => t.stop()); }
+      videoRef.current.pause();
+      videoRef.current.srcObject = null;
     }
   }, [])
 
   useEffect(() => {
-    let cancelled = false
-    let localStream: MediaStream | null = null
+    let disposed = false;
+    let localStream: MediaStream | null = null;
 
     const init = async () => {
       try {
-        localStream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: "environment", width: 640, height: 480 },
-          audio: true,
-        })
-
-        // If this effect was already cleaned up, kill the stream immediately
-        if (cancelled) {
-          localStream.getTracks().forEach(t => t.stop())
-          return
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: 640, height: 480 }, audio: true })
+        // If cleanup already ran (React Strict Mode), kill this stream immediately
+        if (disposed) {
+          stream.getTracks().forEach(t => t.stop());
+          return;
         }
-
-        activeStreamRef.current = localStream
-
+        localStream = stream;
+        activeStreamRef.current = stream;
         if (videoRef.current) {
-          videoRef.current.srcObject = localStream
-          connectRef.current(videoRef.current)
-          startMicRef.current(localStream)
+          videoRef.current.srcObject = stream;
+          connect(videoRef.current);
+          startMicrophone(stream);
+          startSpeechRecognition();
         }
-      } catch (err: any) {
-        if (!cancelled) {
-          console.error("Camera Error:", err)
-          setCameraError(err.message || "Camera access denied")
-        }
-      }
+      } catch (err: any) { if (!disposed) setCameraError(err.message || "Camera access denied") }
     }
-
-    init()
+    init();
     const timer = setInterval(() => setSessionTime(p => p + 1), 1000)
-
     return () => {
-      cancelled = true
-      clearInterval(timer)
-      disconnectRef.current()
-      // Kill stream that was assigned
-      if (activeStreamRef.current) {
-        activeStreamRef.current.getTracks().forEach(t => t.stop())
-        activeStreamRef.current = null
-      }
-      // Also kill localStream directly in case it resolved after cleanup started
+      disposed = true;
+      clearInterval(timer);
+      disconnect();
+      stopAllMedia();
+      // Nuclear: also stop the local stream directly in case refs were overwritten
       if (localStream) {
-        localStream.getTracks().forEach(t => t.stop())
-      }
-      if (videoRef.current) {
-        videoRef.current.srcObject = null
+        localStream.getTracks().forEach(t => t.stop());
+        localStream = null;
       }
     }
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [connect, startMicrophone, disconnect, stopAllMedia, startSpeechRecognition])
 
   const formatTime = (s: number) => `${Math.floor(s / 60).toString().padStart(2, "0")}:${(s % 60).toString().padStart(2, "0")}`
 
@@ -109,72 +140,80 @@ export function SessionView({ onStop }: { onStop: (summary?: any) => void }) {
       {cameraError ? (
         <div className="flex items-center justify-center h-full text-white">{cameraError}</div>
       ) : !isStopping ? (
-        <video ref={videoRef} autoPlay playsInline muted className="absolute inset-0 w-full h-full object-cover" />
+        <video ref={videoRef} autoPlay playsInline muted className="absolute inset-0 w-full h-full object-cover opacity-80" />
       ) : (
-        <div className="flex items-center justify-center h-full">
-          <Loader2 size={48} className="text-white animate-spin" />
+        <div className="flex items-center justify-center h-full"><Loader2 size={48} className="text-white animate-spin" /></div>
+      )}
+      <div className="absolute top-0 left-0 right-0 p-4 flex flex-col items-center">
+        <div className="bg-yellow-500 text-black px-4 py-1 rounded text-xs font-bold flex items-center gap-2"><AlertTriangle size={14} /> AI ASSISTANT: NOT A DOCTOR</div>
+        <div className="mt-4 text-white font-mono text-xl bg-black/40 px-3 py-1 rounded-full">{formatTime(sessionTime)}</div>
+      </div>
+      {/* Email input popup — triggered by backend when Gemini calls draft_doctor_email */}
+      {showEmailInput && (
+        <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-gray-900/95 border border-white/20 rounded-2xl p-6 w-full max-w-sm mx-6 shadow-2xl">
+            <div className="flex items-center justify-between mb-1">
+              <p className="text-white text-sm font-semibold">Send email to:</p>
+              <button
+                onClick={() => { setShowEmailInput(false); setEmailValue(""); }}
+                className="text-white/50 hover:text-white transition-colors"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            {emailSubject && <p className="text-white/50 text-xs mb-3 truncate">Re: {emailSubject}</p>}
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                const trimmed = emailValue.trim();
+                if (trimmed) {
+                  sendEmailResponse(trimmed);
+                  addToTranscript({ speaker: 'user', text: `Email: ${trimmed}` });
+                  setShowEmailInput(false);
+                  setEmailValue("");
+                  setEmailSubject("");
+                  setCurrentMessage("Sending email...");
+                }
+              }}
+              className="flex gap-2"
+            >
+              <input
+                type="email"
+                value={emailValue}
+                onChange={(e) => setEmailValue(e.target.value)}
+                placeholder="doctor@example.com"
+                className="flex-1 bg-black/50 border border-white/20 rounded-lg px-4 py-3 text-white text-sm placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-blue-500/70"
+                autoFocus
+                required
+              />
+              <button
+                type="submit"
+                className="bg-blue-600 text-white px-4 py-3 rounded-lg font-semibold hover:bg-blue-500 transition-all active:scale-95 flex items-center gap-1.5"
+              >
+                <Send size={16} />
+              </button>
+            </form>
+          </div>
         </div>
       )}
-      
-      <div className="absolute top-0 left-0 right-0 p-4 flex flex-col items-center">
-        <div className="bg-yellow-500 text-black px-4 py-1 rounded text-xs font-bold flex items-center gap-2">
-          <AlertTriangle size={14} /> AI ASSISTANT: NOT A DOCTOR
-        </div>
-        <div className="mt-4 text-white font-mono text-xl bg-black/40 px-3 py-1 rounded-full">
-          {formatTime(sessionTime)}
-        </div>
-      </div>
-
       <div className="absolute bottom-10 left-0 right-0 flex flex-col items-center gap-6 px-6">
-        <div className="text-white text-center text-sm max-w-md bg-black/50 p-4 rounded-xl backdrop-blur-md min-h-[60px]">
-          {currentMessage || "Connecting to Aria..."}
-        </div>
-
-        <div className="flex gap-4">
-          <button 
-            disabled={isStopping}
-            onClick={async () => {
-              setIsStopping(true)
-              setCurrentMessage("Generating summary...")
-
-              // 1. Disconnect websocket + audio contexts
-              disconnect()
-
-              // 2. Stop all media tracks
-              stopAllMedia()
-
-              const currentTranscript = transcriptRef.current
-              console.log('📤 Sending transcript to backend:', currentTranscript.length, 'messages')
-
-              try {
-                const res = await fetch(`${BACKEND_URL}/summarize`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ transcript: currentTranscript }),
-                })
-                const data = await res.json()
-                console.log('✅ Summary received from backend:', data)
-                onStop({
-                  transcript: currentTranscript,
-                  aiSummary: data.summary || 'No summary available.',
-                  medications: data.medications || null,
-                  method: data.method,
-                })
-              } catch (err) {
-                console.error('❌ Failed to get summary from backend:', err)
-                onStop({
-                  transcript: currentTranscript,
-                  aiSummary: 'Summary unavailable — backend could not be reached.',
-                  method: 'error',
-                })
-              }
-            }} 
-            className="bg-red-600 text-white px-6 py-3 rounded-xl font-bold flex items-center gap-2 hover:bg-red-500 disabled:opacity-50"
-          >
-            {isStopping ? <Loader2 size={18} className="animate-spin" /> : <Square size={18} />}
-            {isStopping ? 'Summarizing...' : 'Stop'}
-          </button>
-        </div>
+        <div className="text-white text-center text-sm max-w-md bg-black/50 p-4 rounded-xl backdrop-blur-md min-h-[60px] w-full border border-white/10">{currentMessage || "Connecting to Aria..."}</div>
+        <button 
+          disabled={isStopping}
+          onClick={async () => {
+            // Stop all media FIRST before state changes remove the video element
+            disconnect(); stopAllMedia();
+            setIsStopping(true); setCurrentMessage("Generating summary...");
+            try {
+              const res = await fetch(`${BACKEND_URL}/summarize`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ transcript: transcriptRef.current }) })
+              const data = await res.json()
+              onStop({ transcript: transcriptRef.current, aiSummary: data.summary, medications: data.medications, method: data.method })
+            } catch (err) { onStop({ transcript: transcriptRef.current, aiSummary: 'Backend error.', method: 'error' }) }
+          }} 
+          className="bg-red-600 text-white px-10 py-4 rounded-2xl font-bold flex items-center gap-2 hover:bg-red-500 transition-all active:scale-95"
+        >
+          {isStopping ? <Loader2 size={18} className="animate-spin" /> : <Square size={18} />} {isStopping ? 'Summarizing...' : 'Stop'}
+        </button>
       </div>
     </div>
   )
