@@ -38,49 +38,58 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json({ limit: '5mb' }));
 
-const SYSTEM_PROMPT = `You are a clinical session summarizer. 
-CRITICAL RULE: Summarize ONLY the provided transcript. 
-NEVER imagine medications, user symptoms, or dialogue that is not in the text.
-If the transcript is short, the summary MUST be short. 
-
-The transcript includes Agent "Thinking" blocks wrapped in **. Use these to understand the context, but focus the summary on the actual events.
-
-Return a JSON object:
-1. "summary": A single string paragraph.
-2. "medications": An array of exactly 3 objects: { "name", "type", "purpose", "dosage", "status" }. 
-Use "N/A" and "safe" for medications if none were found. Return ONLY raw JSON.`;
+const SYSTEM_PROMPT = `You summarize medical AI assistant sessions.
+You will receive a transcript of a conversation between a user and an AI health assistant.
+Return ONLY a JSON array of 3-4 short bullet-point strings summarizing what actually happened in the call.
+Each string should be one concise takeaway — what the user reported, what the assistant advised, etc.
+Do NOT invent anything not explicitly present in the transcript.
+Do NOT mention medications unless the transcript explicitly discusses them.
+If the transcript is very short or nearly empty, return fewer bullets.
+Example output: ["User reported persistent cough for 2 weeks","Assistant suggested monitoring symptoms","No medications discussed"]
+Return ONLY the JSON array, nothing else.`;
 
 app.post('/summarize', async (req, res) => {
   const { transcript } = req.body || {};
   console.log(`📩 Summarize request: ${Array.isArray(transcript) ? transcript.length : 0} messages.`);
 
   const transcriptText = Array.isArray(transcript) && transcript.length > 0
-    ? transcript.map((t: any) => `${t.speaker.toUpperCase()}: ${t.text}`).join('\n')
+    ? transcript
+        .map((t: any) => {
+          let text = String(t.text || '');
+          // Strip **Thinking** blocks from agent messages
+          if (t.speaker === 'agent') text = text.replace(/\*\*[\s\S]*?\*\*/g, '').trim();
+          return text ? `${t.speaker.toUpperCase()}: ${text}` : '';
+        })
+        .filter(Boolean)
+        .join('\n')
     : 'Empty transcript.';
 
   try {
     const message = await anthropic.messages.create({
       model: 'claude-3-haiku-20240307',
-      max_tokens: 1024,
+      max_tokens: 512,
       system: SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: `Analyze this transcript strictly:\n\n${transcriptText}` }],
+      messages: [{ role: 'user', content: transcriptText }],
     });
 
     const raw = message.content.filter((b) => b.type === 'text').map((b: any) => b.text).join('').trim();
-    let summary: string = 'Summary generated.';
+    let summary: string[] = [];
     let medications = [
-      { name: 'N/A (1)', type: 'N/A', purpose: 'N/A', dosage: 'N/A', status: 'safe' as const },
-      { name: 'N/A (2)', type: 'N/A', purpose: 'N/A', dosage: 'N/A', status: 'safe' as const },
-      { name: 'N/A (3)', type: 'N/A', purpose: 'N/A', dosage: 'N/A', status: 'safe' as const },
+      { name: 'N/A', type: 'N/A', purpose: 'N/A', dosage: 'N/A', status: 'safe' as const },
     ];
 
     try {
       const cleaned = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
       const parsed = JSON.parse(cleaned);
-      summary = Array.isArray(parsed.summary) ? parsed.summary.join(' ') : String(parsed.summary);
-      if (Array.isArray(parsed.medications)) medications = parsed.medications.slice(0, 3);
+      if (Array.isArray(parsed)) {
+        summary = parsed.map(String);
+      } else {
+        summary = [raw];
+      }
     } catch (e) {
-      summary = raw;
+      // If Claude didn't return valid JSON, split by newlines
+      summary = raw.split('\n').map(l => l.replace(/^[\-•\d.)\s]+/, '').trim()).filter(Boolean);
+      if (summary.length === 0) summary = [raw];
     }
 
     // ── Firestore write ────────────────────────────────────────────────────

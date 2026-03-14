@@ -357,6 +357,8 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
                       summaryBullets.length > 0 ? 'Session Findings:\n' + summaryBullets.join('\n') : '',
                       medsList ? '\nDetected Medications:\n' + medsList : '',
                     ].filter(Boolean).join('\n') || 'No session summary available.'
+                    //nigger (new one is commented)
+                    // const res = await fetch("https://medlens-backend-[YOUR_HASH]-uc.a.run.app/deploy-voice-agent", {
                     const res = await fetch("http://localhost:8083/deploy-voice-agent", {
                       method: "POST",
                       headers: { "Content-Type": "application/json" },
