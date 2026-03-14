@@ -169,122 +169,6 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
           </div>
         )}
 
-        {/* Detected Medications */}
-        <section className="flex flex-col gap-4">
-          <div className="flex items-center gap-2">
-            <Pill className="size-5 text-primary" />
-            <h2 className="text-lg font-semibold text-foreground">
-              Detected Medications
-            </h2>
-          </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {(runtimeMeds ?? defaultMedications).map((med: any, index: number) => (
-  <div
-    key={index}
-                className="flex flex-col gap-3 p-5 rounded-xl border border-border bg-card"
-              >
-                <div className="flex items-start justify-between">
-                  <div className="flex flex-col gap-1">
-                    <h3 className="font-semibold text-foreground text-sm">
-                      {med.name}
-                    </h3>
-                    <span className="text-xs text-muted-foreground">
-                      {med.type || ''}
-                    </span>
-                  </div>
-                  {med.status === "safe" ? (
-                    <CheckCircle2 className="size-5 text-success flex-shrink-0" />
-                  ) : (
-                    <AlertTriangle className="size-5 text-warning flex-shrink-0" />
-                  )}
-                </div>
-                <div className="flex flex-col gap-1.5 text-xs text-muted-foreground">
-                  <div className="flex items-center justify-between">
-                    <span>Purpose</span>
-                    <span className="text-foreground font-medium">{med.purpose}</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span>Dosage</span>
-                    <span className="text-foreground font-medium">{med.dosage}</span>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        {/* Interaction Check */}
-        <section className="flex flex-col gap-4">
-          <div className="flex items-center gap-2">
-            <ShieldCheck className="size-5 text-primary" />
-            <h2 className="text-lg font-semibold text-foreground">
-              Interaction Check
-            </h2>
-          </div>
-          <div className="flex flex-col gap-3">
-            {interactionResults.map((result) => (
-              <div
-                key={result.pair}
-                className="flex items-start gap-4 p-4 rounded-xl border border-border bg-card"
-              >
-                <div className="flex-shrink-0 mt-0.5">
-                  {result.severity === "none" ? (
-                    <CheckCircle2 className="size-5 text-success" />
-                  ) : (
-                    <AlertTriangle className="size-5 text-warning" />
-                  )}
-                </div>
-                <div className="flex flex-col gap-1">
-                  <h3 className="text-sm font-semibold text-foreground">
-                    {result.pair}
-                  </h3>
-                  <p className="text-xs text-muted-foreground leading-relaxed">
-                    {result.note}
-                  </p>
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        {/* Medication Schedule */}
-        <section className="flex flex-col gap-4">
-          <div className="flex items-center gap-2">
-            <Clock className="size-5 text-primary" />
-            <h2 className="text-lg font-semibold text-foreground">
-              Recommended Schedule
-            </h2>
-          </div>
-          <div className="flex flex-col gap-3">
-            {schedule.map((slot) => (
-              <div
-                key={slot.time}
-                className="flex items-center gap-5 p-4 rounded-xl border border-border bg-card"
-              >
-                <div className="flex flex-col items-center gap-0.5 min-w-[72px]">
-                  <span className="text-base font-bold text-foreground">
-                    {slot.time}
-                  </span>
-                  <span className="text-[10px] text-muted-foreground uppercase tracking-wider">
-                    {slot.meal}
-                  </span>
-                </div>
-                <div className="h-8 w-px bg-border" />
-                <div className="flex flex-wrap gap-2">
-                  {slot.medications.map((med) => (
-                    <span
-                      key={med}
-                      className="px-3 py-1.5 rounded-lg bg-primary/10 text-primary text-xs font-medium"
-                    >
-                      {med}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
-
         {/* Post-Session Actions */}
         <section className="flex flex-col gap-4">
           <h2 className="text-lg font-semibold text-foreground">
@@ -302,9 +186,11 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
               description="Share the medication schedule as a Google Doc"
             />
             <ActionCard
-              icon={<CalendarDays className="size-5" />}
-              title="Add to Calendar"
-              description="Sync dosage times to your Google Calendar"
+              icon={<GeminiIcon className="size-5" />}
+              title="Deploy Gemini Voice Agent"
+              description="Deploy an AI voice agent to call with medication reminders"
+              onClick={() => { if (!deployed) setPhoneDialogOpen(true) }}
+              disabled={deployed}
             />
             <ActionCard
               icon={<ShoppingBag className="size-5" />}
@@ -357,9 +243,7 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
                       summaryBullets.length > 0 ? 'Session Findings:\n' + summaryBullets.join('\n') : '',
                       medsList ? '\nDetected Medications:\n' + medsList : '',
                     ].filter(Boolean).join('\n') || 'No session summary available.'
-                    //nigger (new one is commented)
-                    // const res = await fetch("https://medlens-backend-[YOUR_HASH]-uc.a.run.app/deploy-voice-agent", {
-                    const res = await fetch("http://localhost:8083/deploy-voice-agent", {
+                    const res = await fetch("https://medlens-backend-88029418749.us-central1.run.app/deploy-voice-agent", {
                       method: "POST",
                       headers: { "Content-Type": "application/json" },
                       body: JSON.stringify({ phoneNumber: phoneNumber.trim(), sessionSummary }),
