@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react"
 import { Pill } from "lucide-react"
 
-export function Navbar({ onStart }: { onStart?: () => void }) {
+export function Navbar({ onStart, onDashboard }: { onStart?: () => void; onDashboard?: () => void }) {
   const [scrolled, setScrolled] = useState(false)
 
   useEffect(() => {
@@ -52,7 +52,14 @@ export function Navbar({ onStart }: { onStart?: () => void }) {
             >
               {label}
             </a>
+            
           ))}
+          <button
+  onClick={onDashboard}
+  className="px-4 py-2 rounded-lg text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-black/5 transition-all duration-150 cursor-pointer"
+>
+  My Sessions
+</button>
         </div>
 
         {/* CTA — saturated sage pastel */}

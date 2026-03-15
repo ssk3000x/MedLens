@@ -10,7 +10,7 @@ import { SessionView } from "@/components/medlens/session-view"
 import { SummaryDashboard } from "@/components/medlens/summary-dashboard"
 import { GoogleHealthConnect } from "@/components/medlens/google-health-connect"
 
-type AppView = "landing" | "session" | "summary"
+type AppView = "landing" | "session" | "summary" | "dashboard"
 
 export default function Home() {
   const [view, setView] = useState<AppView>("landing")
@@ -31,9 +31,13 @@ export default function Home() {
     return <SummaryDashboard onBack={() => setView("landing")} summary={lastSummary} />
   }
 
+  if (view === "dashboard") {
+  return <SummaryDashboard onBack={() => setView("landing")} summary={null} />
+}
+
   return (
     <div className="min-h-screen bg-background">
-      <Navbar onStart={() => setView("session")} />
+      <Navbar onStart={() => setView("session")} onDashboard={() => setView("dashboard")} />
       <main>
         {/* Google Health Connect — hero + main CTA */}
         <GoogleHealthConnect onStart={() => setView("session")} />

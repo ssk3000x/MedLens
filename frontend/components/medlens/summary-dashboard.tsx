@@ -403,7 +403,7 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
                 </div>
                 <h2 className="text-xl font-bold text-foreground">No Critical Interactions Found</h2>
                 <p className="text-sm text-muted-foreground text-center max-w-md">
-                  All detected medications have been cross-checked against FDA databases.
+                  Start a session to generate a summary and unlock the Quick Actions below.
                 </p>
               </div>
             )}
@@ -462,11 +462,10 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
                   }}
                 />
                 <ActionCard
-                  icon={<GeminiIcon className="size-5" />}
-                  title="Deploy Gemini Voice Agent"
-                  description="Deploy an AI voice agent to call with medication reminders"
-                  onClick={() => { if (!deployed) setPhoneDialogOpen(true) }}
-                  disabled={deployed}
+                icon={<GeminiIcon className="size-5" />}
+                title="Deploy Gemini Voice Agent"
+                description="Deploy an AI voice agent to call with medication reminders"
+                onClick={() => setPhoneDialogOpen(true)}
                 />
                 <ActionCard
                   icon={<GoogleMapsIcon className="size-5" />}
