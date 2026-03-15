@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 
-const SUMMARY_SERVER_URL = process.env.SUMMARY_SERVER_URL || 'http://localhost:8082'
+const SUMMARY_SERVER_URL = process.env.SUMMARY_SERVER_URL || 'https://medlens-backend-88029418749.us-central1.run.app'
 
 /**
  * GET /api/sessions?userId=...

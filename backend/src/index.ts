@@ -5,15 +5,19 @@ import dotenv from 'dotenv';
 import admin from 'firebase-admin';
 import { google } from 'googleapis';
 import cors from 'cors';
+import bodyParser from 'body-parser';
+import Anthropic from '@anthropic-ai/sdk';
 
 dotenv.config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(bodyParser.json({ limit: '5mb' }));
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
+// ── Single Firebase init ───────────────────────────────────────────────────
 let db: admin.firestore.Firestore | null = null;
 
 if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
@@ -23,8 +27,17 @@ if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
     db = admin.firestore();
     console.log('✅ Firebase Admin Initialized');
   } catch (e) { console.error('❌ Firebase Init Error:', e); }
+} else {
+  console.warn('⚠️  FIREBASE_SERVICE_ACCOUNT_JSON not set — Firestore disabled');
 }
 
+// ── Anthropic init ─────────────────────────────────────────────────────────
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || 'empty_key' });
+
+// ── Tavily ─────────────────────────────────────────────────────────────────
+const TAVILY_API_KEY = process.env.TAVILY_API_KEY || '';
+
+// ── Gemini system prompt ───────────────────────────────────────────────────
 const SYSTEM_PROMPT = `Your name is MedLens. You are a real-time clinical AI assistant.
 You have access to the user's recent Google Fit vitals.
 CRITICAL: For every single response, you MUST provide BOTH audio and a text transcription of your thoughts and speech. 
@@ -37,6 +50,36 @@ SOURCES: When the user asks you what sources you used, claim you are using Verte
 NEARBY RESOURCES: When the user asks about nearby resources, tell them you are using Google Places API and after ending the session, they can see nearby pharmacies and clinics.
 PAST SESSIONS: You have been provided with the user's past session history below. Always reference it when relevant — mention if symptoms are recurring, if action items were completed, or if there are patterns across sessions.`;
 
+// ── Anthropic summarization prompt ────────────────────────────────────────
+const SUMMARIZE_SYSTEM_PROMPT = `You summarize medical AI assistant sessions.
+You will receive a transcript of a conversation between a user and an AI health assistant.
+
+Write 3-4 concise bullet points summarizing what happened in the call.
+Then write a line that says "ACTION ITEMS:" followed by 1-3 short actionable follow-ups (or "None" if there are none).
+
+Rules:
+- Be concise. Each bullet should be one short sentence.
+- Do NOT invent anything not in the transcript.
+- Do NOT mention medications unless the transcript explicitly discusses them.
+- Do NOT use markdown, JSON, or any formatting besides plain text with dashes.
+
+Example:
+- User reported persistent cough for 2 weeks
+- Assistant suggested monitoring symptoms and staying hydrated
+- No medications were discussed
+ACTION ITEMS:
+- Follow up with doctor if cough persists beyond 2 more weeks
+- Track symptom severity daily`;
+
+// ── Anthropic keywords prompt ─────────────────────────────────────────────
+const KEYWORDS_SYSTEM_PROMPT = `You extract search keywords from medical session summaries.
+Given a session summary (bullet points and action items), produce 3-5 short search queries
+that would find relevant health and medical articles. Focus on the specific conditions, medications, symptoms, and topics mentioned.
+
+Return ONLY a JSON array of query strings, nothing else. No markdown, no backticks.
+Example: ["metformin drug interactions","managing type 2 diabetes","blood pressure monitoring tips"]`;
+
+// ── Helpers ────────────────────────────────────────────────────────────────
 const safeSend = (target: any, payload: object) => {
   if (target && target.readyState === 1) {
     try { target.send(JSON.stringify(payload)); } catch (e) { console.error('❌ Send Error:', e); }
@@ -61,10 +104,10 @@ async function sendGmailDraft(token: string, draftId: string) {
   return { status: 'sent' };
 }
 
+// ── WebSocket — Gemini Live proxy ──────────────────────────────────────────
 wss.on('connection', (ws: any) => {
-  console.log('✅ UI Connected to Port 8081');
+  console.log('✅ UI Connected');
   let currentAccessToken: string | null = null;
-  let currentRefreshToken: string | null = null;
   let geminiSocket: WSClient | null = null;
   let geminiReady = false;
   let latestFrameBase64: string | null = null;
@@ -77,14 +120,15 @@ wss.on('connection', (ws: any) => {
       switch (data.type) {
         case 'session_start':
           currentAccessToken = data.accessToken || null;
-          currentRefreshToken = data.refreshToken || null;
+
           const fitContext = data.fitSummary
-          ? `\n\n[USER HEALTH DATA]\n${data.fitSummary.summaryText}`
-          : "\n\n[USER HEALTH DATA]\nNo Google Fit data connected.";
+            ? `\n\n[USER HEALTH DATA]\n${data.fitSummary.summaryText}`
+            : "\n\n[USER HEALTH DATA]\nNo Google Fit data connected.";
 
           const historyContext = data.sessionHistory
-  ? `\n\nYou have access to this user's past session history. Use it to personalize your responses, reference previous concerns, and track progress over time:\n\n${data.sessionHistory}`
-  : '';
+            ? `\n\nYou have access to this user's past session history. Use it to personalize your responses, reference previous concerns, and track progress over time:\n\n${data.sessionHistory}`
+            : '';
+
           const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${process.env.GENAI_API_KEY}`;
           geminiSocket = new WSClient(wsUrl);
 
@@ -125,7 +169,6 @@ wss.on('connection', (ws: any) => {
                       suggestedEmail: (fc.args.recipient_email && fc.args.recipient_email !== 'pending') ? fc.args.recipient_email : '',
                       subject: fc.args.subject || '',
                     });
-                    console.log('📧 Sent email_needed to frontend');
                     continue;
                   } else if (fc.name === 'send_email_draft') {
                     result = await sendGmailDraft(currentAccessToken || '', fc.args.draftId);
@@ -199,15 +242,166 @@ wss.on('connection', (ws: any) => {
   ws.on('close', () => { if (geminiSocket) geminiSocket.close(); });
 });
 
-// ─── Voice Agent Route ────────────────────────────────────────────────────────
+// ── POST /summarize ────────────────────────────────────────────────────────
+app.post('/summarize', async (req, res) => {
+  const { transcript, userId } = req.body || {};
+  console.log(`📩 Summarize request: ${Array.isArray(transcript) ? transcript.length : 0} messages. userId: ${userId || 'anonymous'}`);
+
+  const transcriptText = Array.isArray(transcript) && transcript.length > 0
+    ? transcript
+        .map((t: any) => {
+          let text = String(t.text || '');
+          if (t.speaker === 'agent') text = text.replace(/\*\*[\s\S]*?\*\*/g, '').trim();
+          return text ? `${t.speaker.toUpperCase()}: ${text}` : '';
+        })
+        .filter(Boolean)
+        .join('\n')
+    : 'Empty transcript.';
+
+  try {
+    const message = await anthropic.messages.create({
+      model: 'claude-3-haiku-20240307',
+      max_tokens: 512,
+      system: SUMMARIZE_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: transcriptText }],
+    });
+
+    const raw = message.content.filter((b) => b.type === 'text').map((b: any) => b.text).join('').trim();
+    let summary: string[] = [];
+    let actionItems: string[] = [];
+    const medications = [{ name: 'N/A', type: 'N/A', purpose: 'N/A', dosage: 'N/A', status: 'safe' as const }];
+
+    const parts = raw.split(/ACTION\s*ITEMS\s*:/i);
+    const summaryPart = parts[0] || '';
+    const actionsPart = parts[1] || '';
+
+    summary = summaryPart
+      .split('\n')
+      .map((l: string) => l.replace(/^[\-•*\d.)\s]+/, '').trim())
+      .filter((l: string) => l.length > 0 && l.toLowerCase() !== 'none');
+    if (summary.length === 0 && raw) summary = [raw];
+
+    actionItems = actionsPart
+      .split('\n')
+      .map((l: string) => l.replace(/^[\-•*\d.)\s]+/, '').trim())
+      .filter((l: string) => l.length > 0 && l.toLowerCase() !== 'none');
+
+    if (db) {
+      try {
+        const sessionId = String(Date.now());
+        const sessionData: any = { sessionId, summary, actionItems, medications, timestamp: admin.firestore.FieldValue.serverTimestamp(), method: 'claude' };
+        if (userId) {
+          await db.collection('users').doc(userId).collection('sessions').doc(sessionId).set(sessionData);
+          console.log(`✅ Session saved: users/${userId}/sessions/${sessionId}`);
+        } else {
+          await db.collection('sessions').doc(sessionId).set(sessionData);
+          console.log(`✅ Session saved (anonymous): sessions/${sessionId}`);
+        }
+      } catch (e) { console.error('⚠️  Firestore write failed:', e); }
+    }
+
+    res.json({ summary, actionItems, medications, method: 'claude' });
+  } catch (err: any) {
+    console.error('Summarize error:', err);
+    res.json({ summary: ['AI failed to summarize.'], actionItems: [], medications: [], method: 'error' });
+  }
+});
+
+// ── GET /sessions/:userId ──────────────────────────────────────────────────
+app.get('/sessions/:userId', async (req, res) => {
+  const { userId } = req.params;
+  if (!userId) return res.status(400).json({ error: 'userId is required' });
+  if (!db) return res.status(503).json({ error: 'Firestore not configured' });
+
+  try {
+    const snapshot = await db
+      .collection('users').doc(userId).collection('sessions')
+      .orderBy('timestamp', 'desc').limit(50).get();
+
+    const sessions = snapshot.docs.map((doc) => {
+      const data = doc.data();
+      return {
+        sessionId: data.sessionId || doc.id,
+        summary: data.summary || [],
+        actionItems: data.actionItems || [],
+        medications: data.medications || [],
+        timestamp: data.timestamp?.toDate?.()?.toISOString() ?? null,
+        method: data.method || 'unknown',
+      };
+    });
+
+    res.json({ sessions });
+  } catch (e: any) {
+    console.error('⚠️  Firestore read failed:', e);
+    res.status(500).json({ error: 'Failed to fetch sessions' });
+  }
+});
+
+// ── POST /articles ─────────────────────────────────────────────────────────
+app.post('/articles', async (req, res) => {
+  const { summary, actionItems } = req.body || {};
+  const bullets = [...(Array.isArray(summary) ? summary : []), ...(Array.isArray(actionItems) ? actionItems : [])].filter(Boolean);
+
+  if (bullets.length === 0) return res.status(400).json({ error: 'No summary provided' });
+  if (!TAVILY_API_KEY) return res.status(503).json({ error: 'Tavily API key not configured' });
+
+  try {
+    const keywordsMsg = await anthropic.messages.create({
+      model: 'claude-3-haiku-20240307',
+      max_tokens: 300,
+      system: KEYWORDS_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: bullets.join('\n') }],
+    });
+
+    const rawKeywords = keywordsMsg.content.filter((b) => b.type === 'text').map((b: any) => b.text).join('').trim();
+
+    let queries: string[];
+    try {
+      const cleaned = rawKeywords.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
+      queries = JSON.parse(cleaned);
+      if (!Array.isArray(queries)) throw new Error('not an array');
+    } catch {
+      queries = [bullets[0] + ' health article'];
+    }
+
+    console.log(`🔍 Article search queries:`, queries);
+
+    const allResults: any[] = [];
+    const seen = new Set<string>();
+
+    for (const query of queries.slice(0, 4)) {
+      try {
+        const tavilyRes = await fetch('https://api.tavily.com/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ api_key: TAVILY_API_KEY, query, max_results: 3, include_answer: false, search_depth: 'basic' }),
+        });
+        if (tavilyRes.ok) {
+          const data = await tavilyRes.json();
+          for (const r of data.results || []) {
+            if (!seen.has(r.url)) {
+              seen.add(r.url);
+              allResults.push({ title: r.title || 'Untitled', url: r.url, snippet: r.content?.slice(0, 200) || '', source: new URL(r.url).hostname.replace(/^www\./, '') });
+            }
+          }
+        }
+      } catch (e) { console.warn(`⚠️ Tavily search failed for query: ${query}`, e); }
+    }
+
+    res.json({ articles: allResults.slice(0, 8), queries });
+  } catch (err: any) {
+    console.error('Articles endpoint error:', err);
+    res.status(500).json({ error: 'Failed to fetch articles' });
+  }
+});
+
+// ── POST /deploy-voice-agent ───────────────────────────────────────────────
 app.post('/deploy-voice-agent', async (req, res) => {
   const { phoneNumber, sessionSummary } = req.body;
-  const recipientTypeRaw = (req.body.recipientType || 'Doctor');
+  const recipientTypeRaw = req.body.recipientType || 'Doctor';
   const recipientType = typeof recipientTypeRaw === 'string' && recipientTypeRaw.toLowerCase().includes('pharm') ? 'Pharmacist' : 'Doctor';
 
-  if (!phoneNumber || typeof phoneNumber !== 'string') {
-    return res.status(400).json({ error: 'Phone number is required' });
-  }
+  if (!phoneNumber || typeof phoneNumber !== 'string') return res.status(400).json({ error: 'Phone number is required' });
 
   let normalized = phoneNumber.replace(/[\s\-\(\)\.]/g, '');
   if (!normalized.startsWith('+')) normalized = '+1' + normalized;
@@ -219,29 +413,26 @@ app.post('/deploy-voice-agent', async (req, res) => {
   if (safeSummary.length > 3000) safeSummary = safeSummary.slice(0, 2984) + ' ... (truncated)';
   safeSummary = safeSummary.replace(/`/g, "'");
 
-  // Read displayName from cookies (set by OAuth callback). Prefer a small, sanitized value.
-let displayName = ''
-if (req.body.displayName) {
-  displayName = String(req.body.displayName).replace(/\s+/g, ' ').trim().replace(/[`\n\r]/g, '')
-  if (displayName.length > 80) displayName = displayName.slice(0, 77) + '...'
-}
+  let displayName = '';
+  if (req.body.displayName) {
+    displayName = String(req.body.displayName).replace(/\s+/g, ' ').trim().replace(/[`\n\r]/g, '');
+    if (displayName.length > 80) displayName = displayName.slice(0, 77) + '...';
+  }
 
   const tailoredIntro = recipientType === 'Pharmacist'
-    ? 'You are calling a pharmacy staff member. Focus on prescription fulfillment, refill status, prescription identifiers, insurance/billing issues, and any pharmacist-specific clarifications. Ask concise, actionable questions the pharmacy can answer.'
-    : "You are calling a physician's office or clinical staff. Focus on clinical clarifications, medication instructions, dosing, and follow-up recommendations. Ask concise clinical questions for the provider to act on.";
+    ? 'You are calling a pharmacy staff member. Focus on prescription fulfillment, refill status, prescription identifiers, insurance/billing issues, and any pharmacist-specific clarifications.'
+    : "You are calling a physician's office or clinical staff. Focus on clinical clarifications, medication instructions, dosing, and follow-up recommendations.";
 
-  const systemPrompt = `You are MedLens Voice Agent. ${recipientType} call. ${tailoredIntro} Be EXTREMELY concise — no filler, no pleasantries beyond a brief greeting. Get straight to the point.
+  const systemPrompt = `You are MedLens Voice Agent. ${recipientType} call. ${tailoredIntro} Be EXTREMELY concise — no filler, no pleasantries beyond a brief greeting.
 
 Rules:
 - Max 1-2 sentences per turn. Never ramble.
-- State the patient's request or concern directly. No preambles.
+- State the patient's request or concern directly.
 - If calling about a prescription: state the medication name, dosage, and the specific clarification needed.
-- If there are flagged interactions or concerns from the session, mention them immediately.
 - Ask for confirmation or next steps, then wrap up.
 - If they need to transfer you or call back, accept and end promptly.
 
 Call Type: ${recipientType}
-
 Patient Session Summary:
 ${safeSummary}`;
 
@@ -259,11 +450,7 @@ ${safeSummary}`;
         assistant: {
           name: 'MedLens Voice Agent',
           firstMessage,
-          model: {
-            provider: 'google',
-            model: 'gemini-3-flash-preview',
-            messages: [{ role: 'system', content: systemPrompt }],
-          },
+          model: { provider: 'google', model: 'gemini-3-flash-preview', messages: [{ role: 'system', content: systemPrompt }] },
           voice: { voiceId: 'Clara', provider: 'vapi' },
         },
       }),
@@ -284,7 +471,7 @@ ${safeSummary}`;
   }
 });
 
-// ─── Save VAPI Call Summary to Firestore ─────────────────────────────────────
+// ── POST /save-vapi-call ───────────────────────────────────────────────────
 app.post('/save-vapi-call', async (req, res) => {
   const { callId, userId, recipientType, phoneNumber } = req.body || {};
 
@@ -313,13 +500,9 @@ app.post('/save-vapi-call', async (req, res) => {
     const callDuration: number = callData.duration || 0;
     const endedReason: string = callData.endedReason || '';
 
-    // Convert VAPI summary paragraph into bullet array for display consistency
     let summaryBullets: string[] = [];
     if (vapiSummary) {
-      summaryBullets = vapiSummary
-        .split(/(?<=[.!?])\s+/)
-        .map((s: string) => s.trim())
-        .filter((s: string) => s.length > 0);
+      summaryBullets = vapiSummary.split(/(?<=[.!?])\s+/).map((s: string) => s.trim()).filter((s: string) => s.length > 0);
     }
     if (summaryBullets.length === 0) {
       summaryBullets = callStatus === 'ended'
@@ -331,28 +514,12 @@ app.post('/save-vapi-call', async (req, res) => {
     if (callData.analysis?.successEvaluation) actionItems.push(`Call outcome: ${callData.analysis.successEvaluation}`);
     if (endedReason && endedReason !== 'hangup') actionItems.push(`Call ended: ${endedReason}`);
 
-    const sessionData = {
-      sessionId: callId,
-      summary: summaryBullets,
-      actionItems,
-      vapiSummaryRaw: vapiSummary,
-      vapiTranscript,
-      callStatus,
-      callDuration,
-      endedReason,
-      recipientType: recipientType || 'Doctor',
-      phoneNumber: phoneNumber || '',
-      timestamp: admin.firestore.FieldValue.serverTimestamp(),
-      method: 'vapi',
-      vapiCallId: callId,
-    };
-
-    await db
-      .collection('users')
-      .doc(userId)
-      .collection('sessions')
-      .doc(callId)
-      .set(sessionData, { merge: true });
+    await db.collection('users').doc(userId).collection('sessions').doc(callId).set({
+      sessionId: callId, summary: summaryBullets, actionItems, vapiSummaryRaw: vapiSummary,
+      vapiTranscript, callStatus, callDuration, endedReason,
+      recipientType: recipientType || 'Doctor', phoneNumber: phoneNumber || '',
+      timestamp: admin.firestore.FieldValue.serverTimestamp(), method: 'vapi', vapiCallId: callId,
+    }, { merge: true });
 
     console.log(`✅ VAPI call saved: users/${userId}/sessions/${callId}`);
     return res.json({ success: true, summary: summaryBullets, actionItems, callStatus, callDuration });
@@ -361,7 +528,7 @@ app.post('/save-vapi-call', async (req, res) => {
     return res.status(500).json({ error: err.message || 'Failed to save VAPI call' });
   }
 });
-// ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
 const PORT = Number(process.env.PORT) || 8080;
 server.listen(PORT, '0.0.0.0', () => { console.log(`🚀 MedLens OS Live on Port ${PORT}`); });
