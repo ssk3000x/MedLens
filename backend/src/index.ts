@@ -215,6 +215,13 @@ app.post('/deploy-voice-agent', async (req, res) => {
   if (safeSummary.length > 3000) safeSummary = safeSummary.slice(0, 2984) + ' ... (truncated)';
   safeSummary = safeSummary.replace(/`/g, "'");
 
+  // Read displayName from cookies (set by OAuth callback). Prefer a small, sanitized value.
+let displayName = ''
+if (req.body.displayName) {
+  displayName = String(req.body.displayName).replace(/\s+/g, ' ').trim().replace(/[`\n\r]/g, '')
+  if (displayName.length > 80) displayName = displayName.slice(0, 77) + '...'
+}
+
   const tailoredIntro = recipientType === 'Pharmacist'
     ? 'You are calling a pharmacy staff member. Focus on prescription fulfillment, refill status, prescription identifiers, insurance/billing issues, and any pharmacist-specific clarifications. Ask concise, actionable questions the pharmacy can answer.'
     : "You are calling a physician's office or clinical staff. Focus on clinical clarifications, medication instructions, dosing, and follow-up recommendations. Ask concise clinical questions for the provider to act on.";
@@ -235,8 +242,8 @@ Patient Session Summary:
 ${safeSummary}`;
 
   const firstMessage = recipientType === 'Pharmacist'
-    ? `Hi, this is MedLens calling on behalf of a patient regarding a prescription at your pharmacy. Do you have a moment to confirm refill/fulfillment details?`
-    : `Hi, this is MedLens calling on behalf of a patient regarding their prescription. Do you have a moment to clarify a few details?`;
+    ? `Hi, this is MedLens calling ${displayName ? `on behalf of ${displayName}` : 'on behalf of a patient'} regarding a prescription at your pharmacy. Do you have a moment to confirm refill/fulfillment details?`
+    : `Hi, this is MedLens calling ${displayName ? `on behalf of ${displayName}` : 'on behalf of a patient'} regarding their prescription. Do you have a moment to clarify a few details?`;
 
   try {
     const response = await fetch('https://api.vapi.ai/call/phone', {
@@ -253,7 +260,7 @@ ${safeSummary}`;
             model: 'gemini-3-flash-preview',
             messages: [{ role: 'system', content: systemPrompt }],
           },
-          voice: { voiceId: 'C', provider: 'vapi' },
+          voice: { voiceId: 'Clara', provider: 'vapi' },
         },
       }),
     });

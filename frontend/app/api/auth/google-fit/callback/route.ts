@@ -70,6 +70,33 @@ export async function GET(request: NextRequest) {
       })
     }
 
+    // Try to fetch the user's profile (display name) so the frontend can show "calling on behalf of <name>".
+    try {
+      const userInfoRes = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+        headers: { Authorization: `Bearer ${tokens.access_token}` },
+      })
+
+      if (userInfoRes.ok) {
+        const profile = await userInfoRes.json()
+        const displayName = profile.name || profile.given_name || profile.email || ''
+        if (displayName) {
+          // Set a non-httpOnly cookie so the frontend JS can read it.
+          // Keep value small and safe.
+          response.cookies.set('displayName', String(displayName), {
+            httpOnly: false,
+            secure: process.env.NODE_ENV === 'production',
+            sameSite: 'lax',
+            maxAge: 60 * 60 * 24 * 30,
+            path: '/',
+          })
+        }
+      } else {
+        console.warn('Could not fetch userinfo:', await userInfoRes.text())
+      }
+    } catch (err) {
+      console.warn('Error fetching user profile:', err)
+    }
+
     return response
   } catch (err) {
     console.error('❌ Google Fit callback error:', err)

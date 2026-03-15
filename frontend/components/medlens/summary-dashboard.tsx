@@ -660,10 +660,15 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
                       summaryBullets.length > 0 ? 'Session Findings:\n' + summaryBullets.join('\n') : '',
                       medsList ? '\nDetected Medications:\n' + medsList : '',
                     ].filter(Boolean).join('\n') || 'No session summary available.'
+                    const displayName = document.cookie
+  .split('; ')
+  .find(r => r.startsWith('displayName='))
+  ?.split('=')[1]
+const decodedName = displayName ? decodeURIComponent(displayName) : ''
                     const res = await fetch("https://medlens-backend-88029418749.us-central1.run.app/deploy-voice-agent", {
                       method: "POST",
                       headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({ phoneNumber: phoneNumber.trim(), sessionSummary, recipientType }),
+                      body: JSON.stringify({ phoneNumber: phoneNumber.trim(), sessionSummary, recipientType, displayName: decodedName }),
                     })
                     if (res.ok) {
                       const data = await res.json()
