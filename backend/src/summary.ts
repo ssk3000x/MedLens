@@ -186,7 +186,7 @@ app.get('/sessions/:userId', async (req, res) => {
 });
 
 // ── POST /articles ─────────────────────────────────────────────────────────
-const TAVILY_API_KEY = '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';
+const TAVILY_API_KEY = process.env.TAVILY_API_KEY || '';
 
 const KEYWORDS_SYSTEM_PROMPT = `You extract search keywords from medical session summaries.
 Given a session summary (bullet points and action items), produce 3-5 short search queries

@@ -1,85 +1,93 @@
 TO RUN FRONTEND:
 cd frontend
 npm run dev
-
-TO RUN BACKEND:
-cd backend
-npx ts-node src/index.ts
-
-# MedLens — Live Multimodal Medication Safety Agent
-
-MedLens is a desktop-first, zero-install web app prototype that demonstrates a live, multimodal medication-safety agent. Users hold a medication bottle up to their webcam, speak naturally, and receive an interruptible, grounded safety check that can draft emails to clinicians.
-
-This repo contains the Next.js frontend (UI, capture, WebSocket client). The Node.js backend that brokers Gemini Live, Vertex Search Grounding, Firestore, and Gmail is expected to live in a sibling `server/` folder or separate repo (see `agents.md` for integration details).
-
-## Features (MVP)
-- Real-time webcam frame snapshots sent inline over WebSocket
-- Continuous audio streaming to a backend agent (planned)
-- UI state machine: `landing`, `session`, `summary`
-- Demo-ready flows: visual interaction check, live interruption, draft-email action
-
-See `agents.md` for the full agent architecture, system prompts, grounding rules, and developer notes.
-
-## Quick Start (frontend)
-Prerequisites:
-- Node.js (recommended 18+)
-- pnpm (preferred) or npm
-
-Install and run the frontend:
+TO RUN FRONTEND (development):
 
 ```bash
+cd frontend
 pnpm install
 pnpm dev
 ```
 
 Open http://localhost:3000 in a modern desktop browser.
 
-Notes:
-- The frontend expects a backend WebSocket endpoint (see `BACKEND_URL` environment variable described below). By default the UI is frontend-only — actions that require a live backend (Gemini, Grounding, Gmail) will be no-ops unless a backend is available.
-
-## Environment & Secrets (example)
-The frontend and backend require several environment variables. Keep secrets out of source control and use a secure secret manager for production.
-
-Recommended environment variables:
+TO RUN BACKEND (development):
 
 ```bash
-GOOGLE_PROJECT_ID=
-FIREBASE_SERVICE_ACCOUNT_JSON='file://path/to/serviceAccount.json'
-GENAI_API_KEY=
-GMAIL_SERVICE_ACCOUNT_JSON='file://path/to/gmail-sa.json'
-BACKEND_URL=wss://your-cloud-run.example/ws
+cd backend
+npx ts-node src/index.ts
 ```
 
-## Where to look in this repo
-- App entry: `app/layout.tsx`, `app/page.tsx`
-- Live UI & capture: `components/medlens/session-view.tsx`
-- Landing & content: `components/medlens/*` (hero, features, safety, footer)
-- Summary dashboard: `components/medlens/summary-dashboard.tsx`
-- UI primitives: `components/ui/*`
-- Utilities: `lib/utils.ts`
-- Agents & integration docs: `agents.md`
+OVERVIEW
+—
+MedLens is a desktop-first web prototype for a live multimodal medication-safety assistant. The frontend captures webcam frames and microphone audio and streams them to a backend AI agent. The backend proxies to Google GenAI (Gemini Live) for live interaction, can draft/send emails via Gmail, and can deploy a voice-call agent (VAPI) to contact clinics or pharmacies. Post-session summarization is provided by a separate summary service that uses Anthropic.
 
-## Backend expectations (summary)
-- Node.js backend using Google GenAI SDK to manage Gemini Live sessions via a persistent WebSocket connection.
-- Responsibilities: forward frames as `realtime_input`, handle audio streaming, run Vertex Search Grounding on medical queries, fetch user meds from Firestore, draft emails via Gmail API.
-- Cloud Run deployment must use `--min-instances=1`, longer timeouts (e.g., `--timeout=3600`), and HTTP/2 for streaming.
+Important current facts (2026-03-14)
+—
+- `backend/src/index.ts` is the main deployed backend (Cloud Run). It implements the WebSocket server, Gemini Live proxy, Gmail draft/send helpers, and VAPI call endpoints.
+- `backend/src/summary.ts` is a separate Express summarization service (Anthropic). It is typically run locally on port 8082 for development and is not automatically deployed with `index.ts`. The frontend uses `SUMMARY_SERVER_URL` to reach it.
+- The repository currently contains sensitive keys in `backend/.env` — rotate and remove them. Treat any checked-in service account JSON or API keys as compromised.
 
-## Testing & Development tips
-- For rapid iteration, build a small local WebSocket stub that simulates backend messages (agent_speech_start/agent_speech_chunk/agent_speech_end, grounding_results, draft_email).
-- Record and replay WebSocket sessions (frames + audio) for E2E tests.
-- Unit-test grounding logic by mocking Vertex Search responses and asserting the UI blocks non-authoritative results.
+Quick references
+—
+- Live capture and session UI: `frontend/components/medlens/session-view.tsx`
+- WS client + audio: `frontend/hooks/use-live-agent.ts`
+- Summary dashboard & VAPI sync: `frontend/components/medlens/summary-dashboard.tsx`
+- Deployed backend entry: `backend/src/index.ts`
+- Local summary server (dev): `backend/src/summary.ts`
 
-## Deployment notes
-- Use Cloud Run (or equivalent) for the backend; ensure pre-warmed instances to meet live latency requirements.
-- Use Cloud Secret Manager for sensitive credentials.
-- Enable Google Cloud Logging to capture Firestore reads and Vertex tool calls for demo proof.
+Environment & configuration (summary)
+—
+Set these in your environment or Cloud Run secrets. Do NOT commit them:
 
-## Contribution
-- Update `agents.md` when backend contracts, WS message schema, or deployment recommendations change.
-- If adding backend code in a sibling folder, document the path and add integration tests that the frontend can use during CI.
+Required/important variables:
 
-## Contact
-Add product owner and primary engineer contacts in `agents.md`.
+- `GENAI_API_KEY` — Gemini Live API key
+- `FIREBASE_SERVICE_ACCOUNT_JSON` — Firestore admin credentials (JSON string)
+- `VAPI_API_KEY` and `VAPI_PHONE_NUMBER_ID` — vapi.ai credentials
+- `ANTHROPIC_API_KEY` — used by `summary.ts`
+- `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_FIT_REDIRECT_URI` — used for Google Fit OAuth
+- `NEXT_PUBLIC_BACKEND_URL` — frontend → backend WS url (wss://...) in production
+- `SUMMARY_SERVER_URL` — frontend proxy to summary service (defaults to `http://localhost:8082` in dev)
 
----
-This README is a starter guide. For the agent-specific details (system prompts, grounding rules, and WebSocket protocol) see `agents.md`.
+Notes & gotchas
+—
+- The system prompt and tool declarations in `backend/src/index.ts` include behavior-enforcing instructions that should be audited and likely tightened for safety and policy compliance.
+- Frontend encodes microphone audio as PCM16 @ 16000 Hz; ensure end-to-end sample rate expectations match.
+- Gmail drafting currently relies on user access tokens returned from Google Fit OAuth flow — this flow must include Gmail compose scope and you should harden server-side refresh handling.
+- Tavily API key is hard-coded in `summary.ts`; move this to an environment variable before deploying.
+
+Production deployment notes
+—
+Recommended Cloud Run flags for the backend (long-lived sessions):
+
+```bash
+gcloud run deploy medlens-backend \
+	--source . \
+	--region us-central1 \
+	--allow-unauthenticated \
+	--timeout=3600 \
+	--session-affinity \
+	--min-instances=1 \
+	--quiet
+```
+
+Use Cloud Secret Manager for all sensitive configuration, rotate keys if they were checked into `backend/.env`.
+
+Next steps & recommendations
+—
+1. Remove and rotate secrets from `backend/.env` immediately.
+2. Decide and document whether `summary.ts` will be deployed as a separate service or merged into `index.ts`. Set `SUMMARY_SERVER_URL` appropriately.
+3. Sanitize the system prompt in `index.ts` and remove any instructions that require exposing internal model 'thoughts' or force tool calls without explicit user consent.
+4. Move all hard-coded API keys to environment variables.
+5. Add robust server-side Gmail token refresh or adopt a service-account based approach if domain delegation is acceptable.
+
+Where to look next
+—
+- For live agent protocol and system prompts: [AGENTS.md](AGENTS.md)
+- For the WebSocket broker and VAPI/Gmail integration: `backend/src/index.ts`
+- For summarization: `backend/src/summary.ts` and frontend proxy `frontend/app/api/summarize/route.ts`
+
+If you want, I can also:
+- produce a sanitized system prompt patch for `backend/src/index.ts` and a migration checklist to remove checked-in secrets, or
+- prepare a `SUMMARY_SERVER_URL` production deployment plan (Cloud Run service + IAM + secrets). Which would you like next?
