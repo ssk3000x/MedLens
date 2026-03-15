@@ -27,7 +27,6 @@ export function SessionView({ onStop }: { onStop: (summary?: any) => void }) {
     const last = current[current.length - 1];
 
     if (last && last.speaker === entry.speaker) {
-      // Append if same speaker, avoiding exact duplicates
       if (!last.text.includes(entry.text)) {
         last.text += " " + entry.text;
       }
@@ -37,10 +36,7 @@ export function SessionView({ onStop }: { onStop: (summary?: any) => void }) {
   }, [])
 
   const handleAgentMessage = useCallback((msg: string) => {
-    // 1. SAVE RAW (Including **Thinking**)
     addToTranscript({ speaker: 'agent', text: msg });
-
-    // 2. UI DISPLAY (Only show non-thinking parts to the user)
     const displayMsg = msg.replace(/\*\*[\s\S]*?\*\*/g, '').trim();
     if (displayMsg) {
       setCurrentMessage((prev) => (prev === "Analyzing..." ? displayMsg : prev + " " + displayMsg));
@@ -103,7 +99,6 @@ export function SessionView({ onStop }: { onStop: (summary?: any) => void }) {
     const init = async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: 640, height: 480 }, audio: true })
-        // If cleanup already ran (React Strict Mode), kill this stream immediately
         if (disposed) {
           stream.getTracks().forEach(t => t.stop());
           return;
@@ -125,7 +120,6 @@ export function SessionView({ onStop }: { onStop: (summary?: any) => void }) {
       clearInterval(timer);
       disconnect();
       stopAllMedia();
-      // Nuclear: also stop the local stream directly in case refs were overwritten
       if (localStream) {
         localStream.getTracks().forEach(t => t.stop());
         localStream = null;
@@ -148,7 +142,8 @@ export function SessionView({ onStop }: { onStop: (summary?: any) => void }) {
         <div className="bg-yellow-500 text-black px-4 py-1 rounded text-xs font-bold flex items-center gap-2"><AlertTriangle size={14} /> AI ASSISTANT: NOT A DOCTOR</div>
         <div className="mt-4 text-white font-mono text-xl bg-black/40 px-3 py-1 rounded-full">{formatTime(sessionTime)}</div>
       </div>
-      {/* Email input popup — triggered by backend when Gemini calls draft_doctor_email */}
+
+      {/* Email input popup */}
       {showEmailInput && (
         <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/60 backdrop-blur-sm">
           <div className="bg-gray-900/95 border border-white/20 rounded-2xl p-6 w-full max-w-sm mx-6 shadow-2xl">
@@ -196,19 +191,41 @@ export function SessionView({ onStop }: { onStop: (summary?: any) => void }) {
           </div>
         </div>
       )}
+
       <div className="absolute bottom-10 left-0 right-0 flex flex-col items-center gap-6 px-6">
         <div className="text-white text-center text-sm max-w-md bg-black/50 p-4 rounded-xl backdrop-blur-md min-h-[60px] w-full border border-white/10">{currentMessage || "Connecting to Aria..."}</div>
         <button 
           disabled={isStopping}
           onClick={async () => {
-            // Stop all media FIRST before state changes remove the video element
             disconnect(); stopAllMedia();
             setIsStopping(true); setCurrentMessage("Generating summary...");
             try {
-              const res = await fetch(`${BACKEND_URL}/summarize`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ transcript: transcriptRef.current }) })
+              // Get the user's Google ID to scope this session in Firestore
+              let userId: string | undefined
+              try {
+                const userRes = await fetch('/api/user')
+                if (userRes.ok) {
+                  const userData = await userRes.json()
+                  userId = userData.userId
+                }
+              } catch (_) { /* no-op — session saves anonymously if user fetch fails */ }
+
+              const res = await fetch('/api/summarize', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ transcript: transcriptRef.current, userId }),
+              })
               const data = await res.json()
-              onStop({ transcript: transcriptRef.current, aiSummary: data.summary, medications: data.medications, method: data.method })
-            } catch (err) { onStop({ transcript: transcriptRef.current, aiSummary: 'Backend error.', method: 'error' }) }
+              onStop({
+                transcript: transcriptRef.current,
+                aiSummary: data.summary,
+                actionItems: data.actionItems,
+                medications: data.medications,
+                method: data.method,
+              })
+            } catch (err) {
+              onStop({ transcript: transcriptRef.current, aiSummary: 'Backend error.', method: 'error' })
+            }
           }} 
           className="bg-red-600 text-white px-10 py-4 rounded-2xl font-bold flex items-center gap-2 hover:bg-red-500 transition-all active:scale-95"
         >

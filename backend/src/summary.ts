@@ -40,23 +40,29 @@ app.use(bodyParser.json({ limit: '5mb' }));
 
 const SYSTEM_PROMPT = `You summarize medical AI assistant sessions.
 You will receive a transcript of a conversation between a user and an AI health assistant.
-Return ONLY a JSON array of 3-4 short bullet-point strings summarizing what actually happened in the call.
-Each string should be one concise takeaway — what the user reported, what the assistant advised, etc.
-Do NOT invent anything not explicitly present in the transcript.
-Do NOT mention medications unless the transcript explicitly discusses them.
-If the transcript is very short or nearly empty, return fewer bullets.
-Example output: ["User reported persistent cough for 2 weeks","Assistant suggested monitoring symptoms","No medications discussed"]
-Return ONLY the JSON array, nothing else.`;
 
+Return ONLY a JSON object with exactly two keys:
+- "summary": an array of 3-4 short bullet-point strings summarizing what actually happened in the call (what the user reported, what the assistant advised, etc.)
+- "actionItems": an array of 1-3 short actionable follow-up strings the user should do after this call (e.g. "Schedule follow-up with cardiologist", "Monitor blood pressure daily for 1 week"). If there are no clear action items, return an empty array.
+
+Rules:
+- Do NOT invent anything not explicitly present in the transcript.
+- Do NOT mention medications unless the transcript explicitly discusses them.
+- If the transcript is very short or nearly empty, return fewer bullets.
+- Return ONLY the JSON object, nothing else — no markdown, no backticks, no preamble.
+
+Example output:
+{"summary":["User reported persistent cough for 2 weeks","Assistant suggested monitoring symptoms and staying hydrated","No medications discussed"],"actionItems":["Follow up with primary care physician if cough persists beyond 2 more weeks","Track symptom severity daily"]}`;
+
+// ── POST /summarize ────────────────────────────────────────────────────────
 app.post('/summarize', async (req, res) => {
-  const { transcript } = req.body || {};
-  console.log(`📩 Summarize request: ${Array.isArray(transcript) ? transcript.length : 0} messages.`);
+  const { transcript, userId } = req.body || {};
+  console.log(`📩 Summarize request: ${Array.isArray(transcript) ? transcript.length : 0} messages. userId: ${userId || 'anonymous'}`);
 
   const transcriptText = Array.isArray(transcript) && transcript.length > 0
     ? transcript
         .map((t: any) => {
           let text = String(t.text || '');
-          // Strip **Thinking** blocks from agent messages
           if (t.speaker === 'agent') text = text.replace(/\*\*[\s\S]*?\*\*/g, '').trim();
           return text ? `${t.speaker.toUpperCase()}: ${text}` : '';
         })
@@ -74,6 +80,7 @@ app.post('/summarize', async (req, res) => {
 
     const raw = message.content.filter((b) => b.type === 'text').map((b: any) => b.text).join('').trim();
     let summary: string[] = [];
+    let actionItems: string[] = [];
     let medications = [
       { name: 'N/A', type: 'N/A', purpose: 'N/A', dosage: 'N/A', status: 'safe' as const },
     ];
@@ -82,13 +89,15 @@ app.post('/summarize', async (req, res) => {
       const cleaned = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
       const parsed = JSON.parse(cleaned);
       if (Array.isArray(parsed)) {
+        // Legacy: model returned bare array — treat as summary only
         summary = parsed.map(String);
-      } else {
-        summary = [raw];
+      } else if (parsed && typeof parsed === 'object') {
+        summary = Array.isArray(parsed.summary) ? parsed.summary.map(String) : [];
+        actionItems = Array.isArray(parsed.actionItems) ? parsed.actionItems.map(String) : [];
       }
     } catch (e) {
-      // If Claude didn't return valid JSON, split by newlines
-      summary = raw.split('\n').map(l => l.replace(/^[\-•\d.)\s]+/, '').trim()).filter(Boolean);
+      // Fallback: split raw text into summary bullets
+      summary = raw.split('\n').map((l: string) => l.replace(/^[\-•\d.)\s]+/, '').trim()).filter(Boolean);
       if (summary.length === 0) summary = [raw];
     }
 
@@ -96,23 +105,175 @@ app.post('/summarize', async (req, res) => {
     if (db) {
       try {
         const sessionId = String(Date.now());
-        await db.collection('sessions').doc(sessionId).set({
+        const sessionData: any = {
           sessionId,
           summary,
+          actionItems,
           medications,
           timestamp: admin.firestore.FieldValue.serverTimestamp(),
           method: 'claude',
-        });
-        console.log(`✅ Session saved to Firestore: ${sessionId}`);
+        };
+
+        if (userId) {
+          // Scoped to user: users/{userId}/sessions/{sessionId}
+          await db
+            .collection('users')
+            .doc(userId)
+            .collection('sessions')
+            .doc(sessionId)
+            .set(sessionData);
+          console.log(`✅ Session saved to Firestore: users/${userId}/sessions/${sessionId}`);
+        } else {
+          // Fallback: flat collection (anonymous / no Google auth)
+          await db.collection('sessions').doc(sessionId).set(sessionData);
+          console.log(`✅ Session saved to Firestore (anonymous): sessions/${sessionId}`);
+        }
       } catch (e) {
         console.error('⚠️  Firestore write failed:', e);
       }
     }
-    // ──────────────────────────────────────────────────────────────────────
 
-    res.json({ summary, medications, method: 'claude' });
+    res.json({ summary, actionItems, medications, method: 'claude' });
   } catch (err: any) {
-    res.json({ summary: 'AI failed to summarize.', medications: [], method: 'error' });
+    console.error('Summarize error:', err);
+    res.json({ summary: ['AI failed to summarize.'], actionItems: [], medications: [], method: 'error' });
+  }
+});
+
+// ── GET /sessions/:userId ──────────────────────────────────────────────────
+app.get('/sessions/:userId', async (req, res) => {
+  const { userId } = req.params;
+
+  if (!userId) {
+    return res.status(400).json({ error: 'userId is required' });
+  }
+
+  if (!db) {
+    return res.status(503).json({ error: 'Firestore not configured' });
+  }
+
+  try {
+    const snapshot = await db
+      .collection('users')
+      .doc(userId)
+      .collection('sessions')
+      .orderBy('timestamp', 'desc')
+      .limit(50)
+      .get();
+
+    const sessions = snapshot.docs.map((doc) => {
+      const data = doc.data();
+      return {
+        sessionId: data.sessionId || doc.id,
+        summary: data.summary || [],
+        actionItems: data.actionItems || [],
+        medications: data.medications || [],
+        // Convert Firestore Timestamp to ISO string for the frontend
+        timestamp: data.timestamp?.toDate?.()?.toISOString() ?? null,
+        method: data.method || 'unknown',
+      };
+    });
+
+    res.json({ sessions });
+  } catch (e: any) {
+    console.error('⚠️  Firestore read failed:', e);
+    res.status(500).json({ error: 'Failed to fetch sessions' });
+  }
+});
+
+// ── POST /articles ─────────────────────────────────────────────────────────
+const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
+
+const KEYWORDS_SYSTEM_PROMPT = `You extract search keywords from medical session summaries.
+Given a session summary (array of bullet points and action items), produce 3-5 focused search queries
+that would find relevant health articles. Focus on the specific conditions, medications, and topics mentioned.
+Append "site:health.google.com OR site:health.google OR site:blog.google/health" to each query so results come from Google health sources.
+
+Return ONLY a JSON array of query strings, nothing else. No markdown, no backticks.
+Example: ["metformin drug interactions site:health.google.com OR site:health.google OR site:blog.google/health","managing type 2 diabetes site:health.google.com OR site:health.google OR site:blog.google/health"]`;
+
+app.post('/articles', async (req, res) => {
+  const { summary, actionItems } = req.body || {};
+  const bullets = [
+    ...(Array.isArray(summary) ? summary : []),
+    ...(Array.isArray(actionItems) ? actionItems : []),
+  ].filter(Boolean);
+
+  if (bullets.length === 0) {
+    return res.status(400).json({ error: 'No summary provided' });
+  }
+
+  if (!TAVILY_API_KEY) {
+    return res.status(503).json({ error: 'Tavily API key not configured' });
+  }
+
+  try {
+    // Step 1: Use Claude to extract search keywords from the summary
+    const keywordsMsg = await anthropic.messages.create({
+      model: 'claude-3-haiku-20240307',
+      max_tokens: 300,
+      system: KEYWORDS_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: bullets.join('\n') }],
+    });
+
+    const rawKeywords = keywordsMsg.content
+      .filter((b) => b.type === 'text')
+      .map((b: any) => b.text)
+      .join('')
+      .trim();
+
+    let queries: string[];
+    try {
+      const cleaned = rawKeywords.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
+      queries = JSON.parse(cleaned);
+      if (!Array.isArray(queries)) throw new Error('not an array');
+    } catch {
+      queries = [bullets[0] + ' health article site:health.google.com'];
+    }
+
+    console.log(`🔍 Article search queries:`, queries);
+
+    // Step 2: Search Tavily for each query and collect results
+    const allResults: any[] = [];
+    const seen = new Set<string>();
+
+    for (const query of queries.slice(0, 4)) {
+      try {
+        const tavilyRes = await fetch('https://api.tavily.com/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            api_key: TAVILY_API_KEY,
+            query,
+            max_results: 3,
+            include_answer: false,
+            search_depth: 'basic',
+          }),
+        });
+
+        if (tavilyRes.ok) {
+          const data = await tavilyRes.json();
+          for (const r of data.results || []) {
+            if (!seen.has(r.url)) {
+              seen.add(r.url);
+              allResults.push({
+                title: r.title || 'Untitled',
+                url: r.url,
+                snippet: r.content?.slice(0, 200) || '',
+                source: new URL(r.url).hostname.replace(/^www\./, ''),
+              });
+            }
+          }
+        }
+      } catch (e) {
+        console.warn(`⚠️ Tavily search failed for query: ${query}`, e);
+      }
+    }
+
+    res.json({ articles: allResults.slice(0, 8), queries });
+  } catch (err: any) {
+    console.error('Articles endpoint error:', err);
+    res.status(500).json({ error: 'Failed to fetch articles' });
   }
 });
 

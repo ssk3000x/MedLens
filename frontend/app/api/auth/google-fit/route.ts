@@ -5,6 +5,11 @@ const REDIRECT_URI = process.env.GOOGLE_FIT_REDIRECT_URI || 'http://localhost:30
 
 // Google Fit / Health Connect scopes
 const SCOPES = [
+  // Identity — needed to scope Firestore data per user
+  'openid',
+  'email',
+  'profile',
+  // Fitness
   'https://www.googleapis.com/auth/fitness.activity.read',
   'https://www.googleapis.com/auth/fitness.body.read',
   'https://www.googleapis.com/auth/fitness.heart_rate.read',
@@ -13,7 +18,7 @@ const SCOPES = [
   'https://www.googleapis.com/auth/fitness.blood_glucose.read',
   'https://www.googleapis.com/auth/fitness.oxygen_saturation.read',
   'https://www.googleapis.com/auth/fitness.body_temperature.read',
-  // Allow composing emails so the agent can create drafts on the user's behalf
+  // Gmail
   'https://www.googleapis.com/auth/gmail.compose',
 ]
 
