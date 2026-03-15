@@ -3,10 +3,6 @@
 import { useState, useEffect } from "react"
 import {
   BookOpen,
-  FileText,
-  CalendarDays,
-  ShoppingBag,
-  Pill,
   ShieldCheck,
   AlertTriangle,
   CheckCircle2,
@@ -22,7 +18,8 @@ import {
   Download,
   Phone,
   User,
-  MapPin,
+  Pill,
+  RefreshCw,
 } from "lucide-react"
 import {
   Dialog,
@@ -49,11 +46,7 @@ interface SessionRecord {
 function formatDate(iso: string | null): string {
   if (!iso) return 'Unknown date'
   const d = new Date(iso)
-  return d.toLocaleDateString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-  })
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
 }
 
 function formatTime(iso: string | null): string {
@@ -64,7 +57,7 @@ function formatTime(iso: string | null): string {
 
 // ── Call History Grid ──────────────────────────────────────────────────────
 
-function CallHistoryGrid({ userId }: { userId: string }) {
+function CallHistoryGrid({ userId, refreshTrigger }: { userId: string; refreshTrigger: number }) {
   const [sessions, setSessions] = useState<SessionRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -87,7 +80,7 @@ function CallHistoryGrid({ userId }: { userId: string }) {
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false))
-  }, [userId])
+  }, [userId, refreshTrigger])
 
   const filtered = sessions.filter((s) => {
     if (filter === 'one-on-one') return s.method === 'claude' || s.method === 'gemini' || !s.method || s.method === 'unknown'
@@ -263,51 +256,72 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
   const [articlesLoading, setArticlesLoading] = useState(false)
   const [articles, setArticles] = useState<{ title: string; url: string; snippet: string; source: string }[]>([])
   const [articlesError, setArticlesError] = useState<string | null>(null)
+  const [mapsOpen, setMapsOpen] = useState(false)
 
-  // Fetch Google identity on mount for history scoping
+  // VAPI sync state
+  const [pendingVapiCallId, setPendingVapiCallId] = useState<string | null>(null)
+  const [pendingVapiRecipientType, setPendingVapiRecipientType] = useState<string>('Doctor')
+  const [syncing, setSyncing] = useState(false)
+  const [syncResult, setSyncResult] = useState<'success' | 'error' | null>(null)
+  const [historyRefreshTrigger, setHistoryRefreshTrigger] = useState(0)
+
   useEffect(() => {
     fetch('/api/user')
       .then((r) => r.ok ? r.json() : null)
-      .then((data) => {
-        if (data?.userId) setUserId(data.userId)
-      })
-      .catch(() => {/* no-op — history just won't load */})
+      .then((data) => { if (data?.userId) setUserId(data.userId) })
+      .catch(() => {})
   }, [])
 
-  // runtime-provided summary overrides static content when present
   const runtimeMeds = summary?.medications || null
   const runtimeSummaryRaw = summary?.aiSummary || summary?.summaryText || null
   const runtimeTranscript = summary?.transcript || null
   const runtimeActionItems: string[] = summary?.actionItems || []
 
-  // Normalize summary into clean bullet strings
   const summaryBullets: string[] = (() => {
     let src = runtimeSummaryRaw
     if (!src) return []
     if (typeof src === 'object') {
-      if (Array.isArray(src)) {
-        src = src.join('\n')
-      } else if (src.summary) {
-        src = Array.isArray(src.summary) ? src.summary.join('\n') : String(src.summary)
-      } else {
-        src = JSON.stringify(src)
-      }
+      if (Array.isArray(src)) src = src.join('\n')
+      else if (src.summary) src = Array.isArray(src.summary) ? src.summary.join('\n') : String(src.summary)
+      else src = JSON.stringify(src)
     }
     if (typeof src === 'string') {
       try {
         const parsed = JSON.parse(src)
-        if (Array.isArray(parsed)) {
-          src = parsed.join('\n')
-        } else if (parsed?.summary) {
-          src = Array.isArray(parsed.summary) ? parsed.summary.join('\n') : String(parsed.summary)
-        }
-      } catch (_) { /* not JSON, use as-is */ }
+        if (Array.isArray(parsed)) src = parsed.join('\n')
+        else if (parsed?.summary) src = Array.isArray(parsed.summary) ? parsed.summary.join('\n') : String(parsed.summary)
+      } catch (_) {}
     }
     return String(src)
       .split(/\n|•/)
       .map((l: string) => l.replace(/^[\-\s"]+|["]+$/g, '').trim())
       .filter((l: string) => l.length > 0)
   })()
+
+  const handleSyncVapiCall = async () => {
+    if (!pendingVapiCallId || !userId) return
+    setSyncing(true)
+    setSyncResult(null)
+    try {
+      const res = await fetch('/api/sync-vapi', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          callId: pendingVapiCallId,
+          userId,
+          recipientType: pendingVapiRecipientType,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`)
+      setSyncResult('success')
+      setHistoryRefreshTrigger((n) => n + 1)
+    } catch {
+      setSyncResult('error')
+    } finally {
+      setSyncing(false)
+    }
+  }
 
   return (
     <div className="min-h-screen bg-background">
@@ -338,30 +352,28 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
           </p>
         </div>
 
-        {/* Session Summary + Quick Actions — side by side on desktop */}
+        {/* Session Summary + Quick Actions */}
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
-          {/* Left column: Session summary (takes 3/5 width) */}
+          {/* Left: Session summary */}
           <div className="lg:col-span-3">
             {summaryBullets.length > 0 ? (
               <div className="flex flex-col items-start gap-3 p-6 rounded-2xl bg-card border border-border h-full">
                 <h2 className="text-lg font-semibold text-foreground">This Session</h2>
                 <ul className="flex flex-col gap-2.5 w-full">
-                  {summaryBullets.map((line: string, i: number) => (
+                  {summaryBullets.map((line, i) => (
                     <li key={i} className="flex items-start gap-3 text-sm text-muted-foreground leading-relaxed">
                       <span className="mt-1 size-1.5 rounded-full bg-primary flex-shrink-0" />
                       {line}
                     </li>
                   ))}
                 </ul>
-
-                {/* Action items for this session */}
                 {runtimeActionItems.length > 0 && (
                   <div className="w-full mt-2 pt-4 border-t border-border">
                     <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">
                       Action Items
                     </h3>
                     <ul className="flex flex-col gap-2">
-                      {runtimeActionItems.map((item: string, i: number) => (
+                      {runtimeActionItems.map((item, i) => (
                         <li key={i} className="flex items-start gap-2.5 text-sm text-muted-foreground leading-relaxed">
                           <CheckCircle2 className="size-3.5 mt-0.5 text-primary flex-shrink-0" />
                           {item}
@@ -370,7 +382,6 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
                     </ul>
                   </div>
                 )}
-
                 {runtimeTranscript && runtimeTranscript.length > 0 && (
                   <details className="mt-2 text-xs text-muted-foreground w-full">
                     <summary className="cursor-pointer">View transcript ({runtimeTranscript.length} lines)</summary>
@@ -392,13 +403,13 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
                 </div>
                 <h2 className="text-xl font-bold text-foreground">No Critical Interactions Found</h2>
                 <p className="text-sm text-muted-foreground text-center max-w-md">
-                  All 3 detected medications have been cross-checked against FDA databases. One minor note was flagged for your awareness.
+                  All detected medications have been cross-checked against FDA databases.
                 </p>
               </div>
             )}
           </div>
 
-          {/* Right column: Quick Actions (takes 2/5 width) */}
+          {/* Right: Quick Actions */}
           <div className="lg:col-span-2">
             <div className="flex flex-col gap-3 h-full">
               <h2 className="text-lg font-semibold text-foreground text-center">Quick Actions</h2>
@@ -434,30 +445,14 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
                   onClick={() => {
                     const doc = document.createElement('div')
                     doc.style.cssText = 'font-family:system-ui,sans-serif;color:#111;max-width:700px;margin:0 auto;padding:40px'
-
                     const title = `<h1 style="font-size:22px;margin-bottom:4px">MedLens Session Report</h1>`
                     const date = `<p style="font-size:13px;color:#666;margin-bottom:24px">${new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })} at ${new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</p>`
                     const disclaimer = `<div style="background:#fff8e1;border:1px solid #ffe082;border-radius:8px;padding:12px;font-size:12px;color:#856404;margin-bottom:24px">⚠ This summary was generated by an AI assistant and has not been reviewed by a medical professional.</div>`
-
-                    let summaryHtml = ''
-                    if (summaryBullets.length > 0) {
-                      summaryHtml = `<h2 style="font-size:16px;margin-bottom:8px">Session Summary</h2><ul style="padding-left:18px;margin-bottom:20px">${summaryBullets.map(b => `<li style="font-size:13px;color:#444;margin-bottom:6px;line-height:1.5">${b}</li>`).join('')}</ul>`
-                    }
-
-                    let actionsHtml = ''
-                    if (runtimeActionItems.length > 0) {
-                      actionsHtml = `<h2 style="font-size:16px;margin-bottom:8px">Action Items</h2><ul style="padding-left:18px;margin-bottom:20px">${runtimeActionItems.map(a => `<li style="font-size:13px;color:#444;margin-bottom:6px;line-height:1.5">✓ ${a}</li>`).join('')}</ul>`
-                    }
-
-                    let transcriptHtml = ''
-                    if (runtimeTranscript && runtimeTranscript.length > 0) {
-                      transcriptHtml = `<h2 style="font-size:16px;margin-bottom:8px">Transcript</h2><div style="border:1px solid #e5e7eb;border-radius:8px;padding:12px;margin-bottom:20px">${runtimeTranscript.map((t: any) => `<p style="font-size:12px;margin:4px 0;color:#555"><strong style="text-transform:uppercase;font-size:10px;letter-spacing:0.5px;margin-right:6px">${t.speaker}</strong>${t.text}</p>`).join('')}</div>`
-                    }
-
+                    const summaryHtml = summaryBullets.length > 0 ? `<h2 style="font-size:16px;margin-bottom:8px">Session Summary</h2><ul style="padding-left:18px;margin-bottom:20px">${summaryBullets.map(b => `<li style="font-size:13px;color:#444;margin-bottom:6px;line-height:1.5">${b}</li>`).join('')}</ul>` : ''
+                    const actionsHtml = runtimeActionItems.length > 0 ? `<h2 style="font-size:16px;margin-bottom:8px">Action Items</h2><ul style="padding-left:18px;margin-bottom:20px">${runtimeActionItems.map(a => `<li style="font-size:13px;color:#444;margin-bottom:6px;line-height:1.5">✓ ${a}</li>`).join('')}</ul>` : ''
+                    const transcriptHtml = runtimeTranscript?.length > 0 ? `<h2 style="font-size:16px;margin-bottom:8px">Transcript</h2><div style="border:1px solid #e5e7eb;border-radius:8px;padding:12px;margin-bottom:20px">${runtimeTranscript.map((t: any) => `<p style="font-size:12px;margin:4px 0;color:#555"><strong style="text-transform:uppercase;font-size:10px;letter-spacing:0.5px;margin-right:6px">${t.speaker}</strong>${t.text}</p>`).join('')}</div>` : ''
                     const footer = `<hr style="border:none;border-top:1px solid #e5e7eb;margin:24px 0 12px"/><p style="font-size:11px;color:#999;text-align:center">Generated by MedLens · Not a substitute for professional medical advice</p>`
-
                     doc.innerHTML = title + date + disclaimer + summaryHtml + actionsHtml + transcriptHtml + footer
-
                     const printWindow = window.open('', '_blank')
                     if (printWindow) {
                       printWindow.document.write(`<!DOCTYPE html><html><head><title>MedLens Report</title><style>@media print{@page{margin:20mm}body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}</style></head><body>${doc.innerHTML}</body></html>`)
@@ -474,17 +469,50 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
                   disabled={deployed}
                 />
                 <ActionCard
-                  icon={<MapPin className="size-5" />}
+                  icon={<GoogleMapsIcon className="size-5" />}
                   title="Find Nearby Resources"
-                  description="Locate pharmacies and clinics near you"
-                  onClick={() => {
-                    window.open('https://www.google.com/maps/search/pharmacy+OR+clinic+near+me', '_blank', 'noopener,noreferrer')
-                  }}
+                  description="Pharmacies & clinics via Google Maps"
+                  onClick={() => setMapsOpen(true)}
                 />
               </div>
             </div>
           </div>
         </div>
+
+        {/* VAPI Sync Banner — appears after a call is deployed */}
+        {pendingVapiCallId && (
+          <div className="flex items-center justify-between gap-4 p-4 rounded-xl border border-violet-500/30 bg-violet-500/5">
+            <div className="flex items-center gap-3">
+              <div className="flex items-center justify-center size-8 rounded-full bg-violet-500/10">
+                <Phone className="size-4 text-violet-500" />
+              </div>
+              <div>
+                <p className="text-sm font-medium text-foreground">{pendingVapiRecipientType} call deployed</p>
+                <p className="text-xs text-muted-foreground">After the call ends, sync to save the summary to your history.</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              {syncResult === 'success' && (
+                <span className="text-xs text-emerald-500 font-medium flex items-center gap-1">
+                  <CheckCircle2 className="size-3.5" /> Synced
+                </span>
+              )}
+              {syncResult === 'error' && (
+                <span className="text-xs text-destructive font-medium">Call may still be in progress — try again shortly</span>
+              )}
+              <button
+                onClick={handleSyncVapiCall}
+                disabled={syncing}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-500 text-white text-xs font-medium hover:bg-violet-600 transition-colors disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+              >
+                {syncing
+                  ? <><Loader2 className="size-3.5 animate-spin" /> Syncing…</>
+                  : <><RefreshCw className="size-3.5" /> Sync Call Summary</>
+                }
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Call History Grid */}
         <section className="flex flex-col gap-4">
@@ -493,7 +521,7 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
             <h2 className="text-lg font-semibold text-foreground">Call History</h2>
           </div>
           {userId ? (
-            <CallHistoryGrid userId={userId} />
+            <CallHistoryGrid userId={userId} refreshTrigger={historyRefreshTrigger} />
           ) : (
             <div className="flex items-center gap-2 p-4 rounded-xl border border-border text-sm text-muted-foreground">
               <AlertTriangle className="size-4 flex-shrink-0" />
@@ -510,16 +538,11 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
                 <BookOpen className="size-5 text-primary" />
                 Related Articles
               </DialogTitle>
-              <DialogDescription>
-                Curated articles related to topics from your session
-              </DialogDescription>
+              <DialogDescription>Curated articles related to topics from your session</DialogDescription>
             </DialogHeader>
-
             {articlesLoading ? (
               <div className="flex flex-col items-center justify-center gap-4 py-16">
-                <div className="relative">
-                  <div className="size-12 rounded-full border-4 border-primary/20 border-t-primary animate-spin" />
-                </div>
+                <div className="size-12 rounded-full border-4 border-primary/20 border-t-primary animate-spin" />
                 <p className="text-sm text-muted-foreground animate-pulse">Searching for relevant articles…</p>
               </div>
             ) : articlesError ? (
@@ -535,32 +558,20 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
             ) : (
               <div className="flex flex-col gap-3 py-2">
                 {articles.map((article, i) => {
-                  const colors = ['bg-blue-500', 'bg-emerald-500', 'bg-violet-500', 'bg-amber-500', 'bg-rose-500', 'bg-cyan-500', 'bg-indigo-500', 'bg-pink-500']
+                  const colors = ['bg-blue-500','bg-emerald-500','bg-violet-500','bg-amber-500','bg-rose-500','bg-cyan-500','bg-indigo-500','bg-pink-500']
                   const color = colors[i % colors.length]
                   return (
-                    <a
-                      key={i}
-                      href={article.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="group flex gap-4 p-4 rounded-xl border border-border bg-card hover:border-primary/30 hover:shadow-md transition-all"
-                    >
+                    <a key={i} href={article.url} target="_blank" rel="noopener noreferrer"
+                      className="group flex gap-4 p-4 rounded-xl border border-border bg-card hover:border-primary/30 hover:shadow-md transition-all">
                       <div className={`hidden sm:flex items-center justify-center size-14 rounded-lg flex-shrink-0 ${color}/10`}>
-                        <Pill className={`size-6 ${color.replace('bg-', 'text-')}`} />
+                        <Pill className={`size-6 ${color.replace('bg-','text-')}`} />
                       </div>
                       <div className="flex flex-col gap-1.5 min-w-0 flex-1">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-primary bg-primary/10 px-2 py-0.5 rounded-full">
-                            <Tag className="size-2.5" />
-                            {article.source}
-                          </span>
-                        </div>
-                        <h3 className="text-sm font-semibold text-foreground leading-snug group-hover:text-primary transition-colors">
-                          {article.title}
-                        </h3>
-                        <p className="text-xs text-muted-foreground leading-relaxed line-clamp-2">
-                          {article.snippet}
-                        </p>
+                        <span className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-primary bg-primary/10 px-2 py-0.5 rounded-full w-fit">
+                          <Tag className="size-2.5" />{article.source}
+                        </span>
+                        <h3 className="text-sm font-semibold text-foreground leading-snug group-hover:text-primary transition-colors">{article.title}</h3>
+                        <p className="text-xs text-muted-foreground leading-relaxed line-clamp-2">{article.snippet}</p>
                         <div className="flex items-center gap-1.5 mt-1">
                           <span className="text-[11px] font-medium text-muted-foreground">{article.source}</span>
                           <ExternalLink className="size-3 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
@@ -571,6 +582,30 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
                 })}
               </div>
             )}
+          </DialogContent>
+        </Dialog>
+
+        {/* Google Maps Modal */}
+        <Dialog open={mapsOpen} onOpenChange={setMapsOpen}>
+          <DialogContent className="sm:max-w-3xl p-0 overflow-hidden">
+            <DialogHeader className="px-5 pt-5 pb-3">
+              <DialogTitle className="flex items-center gap-2">
+                <GoogleMapsIcon className="size-5" />
+                Find Nearby Resources
+              </DialogTitle>
+              <DialogDescription>
+                Search for pharmacies, clinics, or other resources near you
+              </DialogDescription>
+            </DialogHeader>
+            <div className="w-full h-[500px]">
+              <iframe
+                title="Google Maps Search"
+                className="w-full h-full border-0"
+                loading="lazy"
+                referrerPolicy="no-referrer-when-downgrade"
+                src="https://maps.google.com/maps?q=pharmacy+OR+clinic+near+me&output=embed"
+              />
+            </div>
           </DialogContent>
         </Dialog>
 
@@ -586,24 +621,16 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
             <div className="flex flex-col gap-3 py-4">
               <label className="text-sm font-medium text-foreground">Call Type</label>
               <div className="flex gap-2 mb-2">
-                <button
-                  type="button"
-                  onClick={() => setRecipientType('Doctor')}
-                  className={`px-3 py-1 rounded-md text-sm font-medium transition-colors ${recipientType === 'Doctor' ? 'bg-primary text-primary-foreground' : 'bg-background border border-border'}`}
-                >
-                  Doctor
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setRecipientType('Pharmacist')}
-                  className={`px-3 py-1 rounded-md text-sm font-medium transition-colors ${recipientType === 'Pharmacist' ? 'bg-primary text-primary-foreground' : 'bg-background border border-border'}`}
-                >
-                  Pharmacist
-                </button>
+                {(['Doctor', 'Pharmacist'] as const).map((type) => (
+                  <button key={type} type="button" onClick={() => setRecipientType(type)}
+                    className={`px-3 py-1 rounded-md text-sm font-medium transition-colors cursor-pointer ${
+                      recipientType === type ? 'bg-primary text-primary-foreground' : 'bg-background border border-border'
+                    }`}>
+                    {type}
+                  </button>
+                ))}
               </div>
-              <label htmlFor="phone-number" className="text-sm font-medium text-foreground">
-                Phone Number
-              </label>
+              <label htmlFor="phone-number" className="text-sm font-medium text-foreground">Phone Number</label>
               <input
                 id="phone-number"
                 type="tel"
@@ -639,8 +666,14 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
                       body: JSON.stringify({ phoneNumber: phoneNumber.trim(), sessionSummary, recipientType }),
                     })
                     if (res.ok) {
+                      const data = await res.json()
                       setDeployed(true)
                       setPhoneDialogOpen(false)
+                      // Store callId for sync button
+                      if (data.callId) {
+                        setPendingVapiCallId(data.callId)
+                        setPendingVapiRecipientType(recipientType)
+                      }
                     } else {
                       const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }))
                       setDeployError(err.error || `Request failed (${res.status})`)
@@ -655,9 +688,7 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
               >
                 {deploying ? "Deploying…" : "Deploy Agent"}
               </button>
-              {deployError && (
-                <p className="text-xs text-red-500 mt-2 col-span-full">{deployError}</p>
-              )}
+              {deployError && <p className="text-xs text-red-500 mt-2 col-span-full">{deployError}</p>}
             </DialogFooter>
           </DialogContent>
         </Dialog>
@@ -668,36 +699,21 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
 
 // ── Sub-components ─────────────────────────────────────────────────────────
 
-function ActionCard({
-  icon, title, description, disabled = false, onClick,
-}: {
-  icon: React.ReactNode
-  title: string
-  description: string
-  disabled?: boolean
-  onClick?: () => void
+function ActionCard({ icon, title, description, disabled = false, onClick }: {
+  icon: React.ReactNode; title: string; description: string; disabled?: boolean; onClick?: () => void
 }) {
   return (
-    <button
-      disabled={disabled}
-      onClick={onClick}
+    <button disabled={disabled} onClick={onClick}
       className={`flex flex-col items-center justify-center gap-2 p-4 rounded-xl border text-center transition-all cursor-pointer ${
-        disabled
-          ? "border-border bg-muted opacity-50 cursor-not-allowed"
-          : "border-border bg-card hover:shadow-md hover:border-primary/30"
-      }`}
-    >
+        disabled ? "border-border bg-muted opacity-50 cursor-not-allowed" : "border-border bg-card hover:shadow-md hover:border-primary/30"
+      }`}>
       <div className={`flex items-center justify-center size-8 rounded-lg flex-shrink-0 ${
         disabled ? "bg-muted-foreground/10 text-muted-foreground" : "bg-primary/10 text-primary"
-      }`}>
-        {icon}
-      </div>
+      }`}>{icon}</div>
       <div className="flex flex-col gap-0.5 items-center">
         <span className="text-sm font-semibold text-foreground leading-tight">{title}</span>
         <span className="text-xs text-muted-foreground leading-snug line-clamp-2">{description}</span>
-        {disabled && (
-          <span className="text-[10px] text-muted-foreground uppercase tracking-wider mt-0.5">Coming Soon</span>
-        )}
+        {disabled && <span className="text-[10px] text-muted-foreground uppercase tracking-wider mt-0.5">Coming Soon</span>}
       </div>
     </button>
   )
@@ -705,28 +721,31 @@ function ActionCard({
 
 function GeminiIcon({ className }: { className?: string }) {
   return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <svg className={className} viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <linearGradient id="gemini-grad" x1="0" y1="0" x2="28" y2="28" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#1C7CF4" />
+          <stop offset="100%" stopColor="#6E42F5" />
+        </linearGradient>
+      </defs>
       <path
-        d="M12 2C12 2 14.5 7.5 17.5 10.5C20.5 13.5 24 12 24 12C24 12 20.5 14.5 17.5 17.5C14.5 20.5 12 22 12 22C12 22 9.5 16.5 6.5 13.5C3.5 10.5 0 12 0 12C0 12 3.5 9.5 6.5 6.5C9.5 3.5 12 2 12 2Z"
-        fill="currentColor"
+        d="M14 28C14 21.75 9.53 16.57 3.68 15.32C2.47 15.07 1.24 14.89 0 14.82V13.18C1.24 13.11 2.47 12.93 3.68 12.68C9.53 11.43 14 6.25 14 0C14 6.25 18.47 11.43 24.32 12.68C25.53 12.93 26.76 13.11 28 13.18V14.82C26.76 14.89 25.53 15.07 24.32 15.32C18.47 16.57 14 21.75 14 28Z"
+        fill="url(#gemini-grad)"
       />
     </svg>
   )
 }
 
-function DeployVoiceAgentButton({ deployed, onClick }: { deployed: boolean; onClick: () => void }) {
+function GoogleMapsIcon({ className }: { className?: string }) {
   return (
-    <button
-      disabled={deployed}
-      onClick={onClick}
-      className={`mt-3 flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer ${
-        deployed
-          ? "bg-primary/10 text-primary cursor-default"
-          : "bg-primary/10 text-primary hover:bg-primary/20"
-      }`}
-    >
-      <GeminiIcon className="size-3.5" />
-      {deployed ? "Voice Agent Deployed ✓" : "Deploy Gemini Voice Agent"}
-    </button>
+    <svg className={className} viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+      <path d="M19.527 4.799c1.212 2.608.937 5.678-.405 8.173-1.101 2.047-2.744 3.74-4.098 5.614-.619.858-1.244 1.75-1.669 2.727-.141.325-.263.658-.383.992-.121.333-.224.673-.34 1.008-.109.314-.236.684-.627.687-.391.003-.504-.382-.605-.691-.239-.726-.471-1.456-.832-2.128-.475-.886-1.086-1.681-1.694-2.487-1.972-2.608-4.082-5.133-4.772-8.345-.537-2.508-.107-5.186 1.27-7.337C7.604 0.399 11.478-.693 14.892.544c1.685.606 3.154 1.727 4.219 3.146l.416 1.109z" fill="#3E7BF1"/>
+      <path d="M19.527 4.799c-1.065-1.419-2.534-2.54-4.219-3.146-1.98-.717-4.155-.702-6.093.118L14.945 7.5l4.582-2.701z" fill="#FDDC4F"/>
+      <path d="M5.199 11.1c-.456-1.584-.527-3.27-.088-4.87L9.268 7.5l-4.069 3.6z" fill="#F0513E"/>
+      <path d="M9.215 1.771C7.366 2.628 5.819 4.13 5.111 6.23l4.157 1.27 4.677-5.729c-1.522-.753-3.2-1.033-4.73 0z" fill="#E2443F"/>
+      <path d="M12 7.5a4.5 4.5 0 100 9 4.5 4.5 0 000-9z" fill="#F0513E"/>
+      <path d="M12 7.5a4.5 4.5 0 110 9 4.5 4.5 0 010-9z" fill="#F0513E"/>
+      <path d="M12 9a3 3 0 100 6 3 3 0 000-6z" fill="#FFFFFF"/>
+    </svg>
   )
 }

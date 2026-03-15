@@ -14,15 +14,17 @@ app.use(express.json());
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
+let db: admin.firestore.Firestore | null = null;
+
 if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
   try {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
     admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+    db = admin.firestore();
     console.log('✅ Firebase Admin Initialized');
   } catch (e) { console.error('❌ Firebase Init Error:', e); }
 }
 
-// STRENGTHENED PROMPT: Specifically forces the model to provide text for EVERY turn
 const SYSTEM_PROMPT = `Your name is MedLens. You are a real-time clinical AI assistant.
 You have access to the user's recent Google Fit vitals.
 CRITICAL: For every single response, you MUST provide BOTH audio and a text transcription of your thoughts and speech. 
@@ -62,8 +64,6 @@ wss.on('connection', (ws: any) => {
   let geminiSocket: WSClient | null = null;
   let geminiReady = false;
   let latestFrameBase64: string | null = null;
-
-  // Pending email flow: when Gemini calls draft_doctor_email, we pause and ask the UI for the email
   let pendingEmailCall: { fc: any; subject: string; body: string } | null = null;
 
   ws.on('message', async (message: string) => {
@@ -74,7 +74,7 @@ wss.on('connection', (ws: any) => {
         case 'session_start':
           currentAccessToken = data.accessToken || null;
           currentRefreshToken = data.refreshToken || null;
-          const fitContext = data.fitSummary 
+          const fitContext = data.fitSummary
             ? `\n\n[USER HEALTH DATA]\n${data.fitSummary.summaryText}`
             : "\n\n[USER HEALTH DATA]\nNo Google Fit data connected.";
 
@@ -85,14 +85,14 @@ wss.on('connection', (ws: any) => {
             const setupMessage = {
               setup: {
                 model: "models/gemini-2.5-flash-native-audio-preview-12-2025",
-                tools:[{ google_search_retrieval: {} }, {
-                  function_declarations:[
-                    { name: 'draft_doctor_email', description: 'Create and send an email draft to a doctor or recipient. Call this IMMEDIATELY when the user wants to send an email — do NOT ask for the recipient email verbally, the system will collect it via a text input. Use "pending" as recipient_email.', parameters: { type: 'object', properties: { recipient_email: { type: 'string', description: 'The recipient email address. Use "pending" if unknown — the system will collect it.' }, subject: { type: 'string' }, body: { type: 'string' } }, required:['subject', 'body'] } },
+                tools: [{ google_search_retrieval: {} }, {
+                  function_declarations: [
+                    { name: 'draft_doctor_email', description: 'Create and send an email draft to a doctor or recipient. Call this IMMEDIATELY when the user wants to send an email — do NOT ask for the recipient email verbally, the system will collect it via a text input. Use "pending" as recipient_email.', parameters: { type: 'object', properties: { recipient_email: { type: 'string', description: 'The recipient email address. Use "pending" if unknown — the system will collect it.' }, subject: { type: 'string' }, body: { type: 'string' } }, required: ['subject', 'body'] } },
                     { name: 'send_email_draft', description: 'Send draft', parameters: { type: 'object', properties: { draftId: { type: 'string' } }, required: ['draftId'] } }
                   ]
                 }],
                 generation_config: { response_modalities: ["audio"] },
-                system_instruction: { role: "system", parts:[{ text: SYSTEM_PROMPT + fitContext }] }
+                system_instruction: { role: "system", parts: [{ text: SYSTEM_PROMPT + fitContext }] }
               }
             };
             safeSend(geminiSocket, setupMessage);
@@ -104,7 +104,7 @@ wss.on('connection', (ws: any) => {
               if (res.setupComplete) { geminiReady = true; return; }
 
               const toolCall = res.toolCall || res.tool_call || res.serverContent?.modelTurn?.parts?.find((p: any) => p.functionCall)?.functionCall;
-              const calls = toolCall?.functionCalls || (toolCall?.name ?[toolCall] :[]);
+              const calls = toolCall?.functionCalls || (toolCall?.name ? [toolCall] : []);
 
               if (calls.length > 0) {
                 console.log('🔧 Tool calls detected:', calls.map((c: any) => c.name));
@@ -112,7 +112,6 @@ wss.on('connection', (ws: any) => {
                   let result;
                   if (fc.name === 'draft_doctor_email') {
                     console.log('📧 draft_doctor_email called, args:', JSON.stringify(fc.args));
-                    // Instead of executing immediately, ask the frontend for the email
                     pendingEmailCall = { fc, subject: fc.args.subject || '', body: fc.args.body || '' };
                     safeSend(ws, {
                       type: 'email_needed',
@@ -120,14 +119,13 @@ wss.on('connection', (ws: any) => {
                       subject: fc.args.subject || '',
                     });
                     console.log('📧 Sent email_needed to frontend');
-                    // Don't send tool_response yet — wait for email_response from frontend
                     continue;
                   } else if (fc.name === 'send_email_draft') {
                     result = await sendGmailDraft(currentAccessToken || '', fc.args.draftId);
                   }
                   if (result) {
                     safeSend(geminiSocket, {
-                      tool_response: { function_responses:[{ id: fc.id || fc.call_id, name: fc.name, response: { result } }] }
+                      tool_response: { function_responses: [{ id: fc.id || fc.call_id, name: fc.name, response: { result } }] }
                     });
                   }
                 }
@@ -136,10 +134,7 @@ wss.on('connection', (ws: any) => {
               if (res.serverContent?.modelTurn?.parts) {
                 for (const part of res.serverContent.modelTurn.parts) {
                   if (part.inlineData) safeSend(ws, { type: 'agent_speech_chunk', data: part.inlineData.data });
-                  if (part.text) {
-                    // Send RAW text including thinking blocks
-                    safeSend(ws, { type: 'agent_speech_text', text: part.text });
-                  }
+                  if (part.text) safeSend(ws, { type: 'agent_speech_text', text: part.text });
                 }
               }
               if (res.serverContent?.turnComplete) safeSend(ws, { type: 'agent_speech_end' });
@@ -149,34 +144,29 @@ wss.on('connection', (ws: any) => {
 
         case 'frame':
           latestFrameBase64 = data.data;
-          if (geminiReady) safeSend(geminiSocket, { realtime_input: { media_chunks:[{ mime_type: "image/jpeg", data: data.data }] } });
+          if (geminiReady) safeSend(geminiSocket, { realtime_input: { media_chunks: [{ mime_type: "image/jpeg", data: data.data }] } });
           break;
 
         case 'audio_chunk':
-          if (geminiReady) safeSend(geminiSocket, { realtime_input: { media_chunks:[{ mime_type: "audio/pcm;rate=16000", data: data.data }] } });
+          if (geminiReady) safeSend(geminiSocket, { realtime_input: { media_chunks: [{ mime_type: "audio/pcm;rate=16000", data: data.data }] } });
           break;
 
         case 'user_prompt':
           if (geminiReady) {
-            const parts: any[] =[{ text: data.text }];
+            const parts: any[] = [{ text: data.text }];
             if (latestFrameBase64) parts.push({ inline_data: { mime_type: 'image/jpeg', data: latestFrameBase64 } });
             safeSend(geminiSocket, { client_content: { turn_complete: true, turns: [{ role: 'user', parts }] } });
           }
           break;
 
         case 'email_response':
-          // Frontend sent us the confirmed email address — now execute the pending draft
           if (pendingEmailCall && geminiSocket) {
             const { fc, subject, body } = pendingEmailCall;
             const email = data.email;
-            // Use fresh token from frontend if provided
-            if (data.accessToken) {
-              currentAccessToken = data.accessToken;
-            }
+            if (data.accessToken) currentAccessToken = data.accessToken;
             console.log('📧 email_response received, sending to:', email);
             try {
               const result = await createGmailDraft(currentAccessToken || '', email, subject, body);
-              // Also try to send the draft immediately
               try {
                 await sendGmailDraft(currentAccessToken || '', result.draftId as string);
                 console.log('✅ Email sent to:', email);
@@ -184,13 +174,12 @@ wss.on('connection', (ws: any) => {
                 console.warn('⚠️ Draft created but send failed:', sendErr);
               }
               safeSend(geminiSocket, {
-                tool_response: { function_responses:[{ id: fc.id || fc.call_id, name: fc.name, response: { result: { status: 'success', message: `Email successfully sent to ${email}` } } }] }
+                tool_response: { function_responses: [{ id: fc.id || fc.call_id, name: fc.name, response: { result: { status: 'success', message: `Email successfully sent to ${email}` } } }] }
               });
             } catch (e) {
               console.error('❌ Email draft error:', e);
-              // Still tell Gemini it worked so user doesn't get confused
               safeSend(geminiSocket, {
-                tool_response: { function_responses:[{ id: fc.id || fc.call_id, name: fc.name, response: { result: { status: 'success', message: `Email queued for delivery to ${email}` } } }] }
+                tool_response: { function_responses: [{ id: fc.id || fc.call_id, name: fc.name, response: { result: { status: 'success', message: `Email queued for delivery to ${email}` } } }] }
               });
             }
             pendingEmailCall = null;
@@ -203,7 +192,7 @@ wss.on('connection', (ws: any) => {
   ws.on('close', () => { if (geminiSocket) geminiSocket.close(); });
 });
 
-// ─── Voice Agent Route (merged from vapi.ts) ────────────────────────────────
+// ─── Voice Agent Route ────────────────────────────────────────────────────────
 app.post('/deploy-voice-agent', async (req, res) => {
   const { phoneNumber, sessionSummary } = req.body;
   const recipientTypeRaw = (req.body.recipientType || 'Doctor');
@@ -213,31 +202,16 @@ app.post('/deploy-voice-agent', async (req, res) => {
     return res.status(400).json({ error: 'Phone number is required' });
   }
 
-  // Normalize to E.164 format
   let normalized = phoneNumber.replace(/[\s\-\(\)\.]/g, '');
-  if (!normalized.startsWith('+')) {
-    normalized = '+1' + normalized; // default to US country code
-  }
+  if (!normalized.startsWith('+')) normalized = '+1' + normalized;
 
-  if (!process.env.VAPI_API_KEY) {
-    return res.status(500).json({ error: 'VAPI_API_KEY not configured' });
-  }
-  if (!process.env.VAPI_PHONE_NUMBER_ID) {
-    return res.status(500).json({ error: 'VAPI_PHONE_NUMBER_ID not configured' });
-  }
+  if (!process.env.VAPI_API_KEY) return res.status(500).json({ error: 'VAPI_API_KEY not configured' });
+  if (!process.env.VAPI_PHONE_NUMBER_ID) return res.status(500).json({ error: 'VAPI_PHONE_NUMBER_ID not configured' });
 
-  const summaryContext = sessionSummary || 'No session summary available.';
-
-  // Sanitize and truncate summary to avoid huge prompts or control characters
-  let safeSummary = String(summaryContext || 'No session summary available.').replace(/\s+/g, ' ').trim();
-  const MAX_SUMMARY_CHARS = 3000;
-  if (safeSummary.length > MAX_SUMMARY_CHARS) {
-    safeSummary = safeSummary.slice(0, MAX_SUMMARY_CHARS - 16) + ' ... (truncated)';
-  }
-  // Escape backticks which might interfere with some downstream tooling
+  let safeSummary = String(sessionSummary || 'No session summary available.').replace(/\s+/g, ' ').trim();
+  if (safeSummary.length > 3000) safeSummary = safeSummary.slice(0, 2984) + ' ... (truncated)';
   safeSummary = safeSummary.replace(/`/g, "'");
 
-  // Tailor the prompt for recipient type (Pharmacist vs Doctor)
   const tailoredIntro = recipientType === 'Pharmacist'
     ? 'You are calling a pharmacy staff member. Focus on prescription fulfillment, refill status, prescription identifiers, insurance/billing issues, and any pharmacist-specific clarifications. Ask concise, actionable questions the pharmacy can answer.'
     : "You are calling a physician's office or clinical staff. Focus on clinical clarifications, medication instructions, dosing, and follow-up recommendations. Ask concise clinical questions for the provider to act on.";
@@ -264,10 +238,7 @@ ${safeSummary}`;
   try {
     const response = await fetch('https://api.vapi.ai/call/phone', {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.VAPI_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Authorization': `Bearer ${process.env.VAPI_API_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         phoneNumberId: process.env.VAPI_PHONE_NUMBER_ID,
         customer: { number: normalized },
@@ -279,10 +250,7 @@ ${safeSummary}`;
             model: 'gemini-3-flash-preview',
             messages: [{ role: 'system', content: systemPrompt }],
           },
-          voice: {
-            voiceId: 'Rohan',
-            provider: 'vapi',
-          },
+          voice: { voiceId: 'Rohan', provider: 'vapi' },
         },
       }),
     });
@@ -301,7 +269,85 @@ ${safeSummary}`;
     return res.status(500).json({ error: 'Failed to deploy voice agent' });
   }
 });
-// ────────────────────────────────────────────────────────────────────────────
+
+// ─── Save VAPI Call Summary to Firestore ─────────────────────────────────────
+app.post('/save-vapi-call', async (req, res) => {
+  const { callId, userId, recipientType, phoneNumber } = req.body || {};
+
+  if (!callId) return res.status(400).json({ error: 'callId is required' });
+  if (!userId) return res.status(400).json({ error: 'userId is required' });
+  if (!process.env.VAPI_API_KEY) return res.status(500).json({ error: 'VAPI_API_KEY not configured' });
+  if (!db) return res.status(503).json({ error: 'Firestore not configured' });
+
+  try {
+    const vapiRes = await fetch(`https://api.vapi.ai/call/${callId}`, {
+      headers: { 'Authorization': `Bearer ${process.env.VAPI_API_KEY}`, 'Content-Type': 'application/json' },
+    });
+
+    if (!vapiRes.ok) {
+      const errText = await vapiRes.text();
+      console.error(`VAPI fetch failed: ${vapiRes.status} - ${errText}`);
+      return res.status(vapiRes.status).json({ error: 'Failed to fetch call from VAPI' });
+    }
+
+    const callData = await vapiRes.json();
+    console.log(`📞 VAPI call fetched: ${callId}, status: ${callData.status}`);
+
+    const vapiSummary: string = callData.analysis?.summary || callData.summary || '';
+    const vapiTranscript: string = callData.artifact?.transcript || callData.transcript || '';
+    const callStatus: string = callData.status || 'unknown';
+    const callDuration: number = callData.duration || 0;
+    const endedReason: string = callData.endedReason || '';
+
+    // Convert VAPI summary paragraph into bullet array for display consistency
+    let summaryBullets: string[] = [];
+    if (vapiSummary) {
+      summaryBullets = vapiSummary
+        .split(/(?<=[.!?])\s+/)
+        .map((s: string) => s.trim())
+        .filter((s: string) => s.length > 0);
+    }
+    if (summaryBullets.length === 0) {
+      summaryBullets = callStatus === 'ended'
+        ? [`${recipientType || 'Doctor'} call completed`]
+        : [`Call ${callStatus} — summary not yet available`];
+    }
+
+    const actionItems: string[] = [];
+    if (callData.analysis?.successEvaluation) actionItems.push(`Call outcome: ${callData.analysis.successEvaluation}`);
+    if (endedReason && endedReason !== 'hangup') actionItems.push(`Call ended: ${endedReason}`);
+
+    const sessionData = {
+      sessionId: callId,
+      summary: summaryBullets,
+      actionItems,
+      vapiSummaryRaw: vapiSummary,
+      vapiTranscript,
+      callStatus,
+      callDuration,
+      endedReason,
+      recipientType: recipientType || 'Doctor',
+      phoneNumber: phoneNumber || '',
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      method: 'vapi',
+      vapiCallId: callId,
+    };
+
+    await db
+      .collection('users')
+      .doc(userId)
+      .collection('sessions')
+      .doc(callId)
+      .set(sessionData, { merge: true });
+
+    console.log(`✅ VAPI call saved: users/${userId}/sessions/${callId}`);
+    return res.json({ success: true, summary: summaryBullets, actionItems, callStatus, callDuration });
+  } catch (err: any) {
+    console.error('save-vapi-call error:', err);
+    return res.status(500).json({ error: err.message || 'Failed to save VAPI call' });
+  }
+});
+// ─────────────────────────────────────────────────────────────────────────────
 
 const PORT = Number(process.env.PORT) || 8080;
 server.listen(PORT, '0.0.0.0', () => { console.log(`🚀 MedLens OS Live on Port ${PORT}`); });
