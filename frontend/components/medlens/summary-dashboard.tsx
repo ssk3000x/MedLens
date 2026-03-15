@@ -201,6 +201,7 @@ function CallHistoryGrid({ userId }: { userId: string }) {
 export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summary?: any }) {
   const [phoneDialogOpen, setPhoneDialogOpen] = useState(false)
   const [phoneNumber, setPhoneNumber] = useState("")
+  const [recipientType, setRecipientType] = useState<'Doctor' | 'Pharmacist'>('Doctor')
   const [deploying, setDeploying] = useState(false)
   const [deployed, setDeployed] = useState(false)
   const [deployError, setDeployError] = useState<string | null>(null)
@@ -489,6 +490,23 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
               </DialogDescription>
             </DialogHeader>
             <div className="flex flex-col gap-3 py-4">
+              <label className="text-sm font-medium text-foreground">Call Type</label>
+              <div className="flex gap-2 mb-2">
+                <button
+                  type="button"
+                  onClick={() => setRecipientType('Doctor')}
+                  className={`px-3 py-1 rounded-md text-sm font-medium transition-colors ${recipientType === 'Doctor' ? 'bg-primary text-primary-foreground' : 'bg-background border border-border'}`}
+                >
+                  Doctor
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRecipientType('Pharmacist')}
+                  className={`px-3 py-1 rounded-md text-sm font-medium transition-colors ${recipientType === 'Pharmacist' ? 'bg-primary text-primary-foreground' : 'bg-background border border-border'}`}
+                >
+                  Pharmacist
+                </button>
+              </div>
               <label htmlFor="phone-number" className="text-sm font-medium text-foreground">
                 Phone Number
               </label>
@@ -524,7 +542,7 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
                     const res = await fetch("https://medlens-backend-88029418749.us-central1.run.app/deploy-voice-agent", {
                       method: "POST",
                       headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({ phoneNumber: phoneNumber.trim(), sessionSummary }),
+                      body: JSON.stringify({ phoneNumber: phoneNumber.trim(), sessionSummary, recipientType }),
                     })
                     if (res.ok) {
                       setDeployed(true)
