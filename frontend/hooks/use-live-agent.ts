@@ -1,5 +1,24 @@
 import { useState, useRef, useCallback } from 'react';
 
+function formatSessionHistory(sessions: any[]): string {
+  if (!sessions || sessions.length === 0) return '';
+  const lines: string[] = ['[PAST SESSION HISTORY]'];
+  sessions.slice(0, 5).forEach((s, i) => {
+    const date = s.timestamp ? new Date(s.timestamp).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Unknown date';
+    const type = s.method === 'vapi' || s.method === 'voice-agent' ? 'Deployed Call' : 'One-on-One Session';
+    lines.push(`\nSession ${i + 1} — ${date} (${type})`);
+    if (s.summary?.length > 0) {
+      lines.push('Summary:');
+      s.summary.forEach((b: string) => lines.push(`  • ${b}`));
+    }
+    if (s.actionItems?.length > 0) {
+      lines.push('Action Items:');
+      s.actionItems.forEach((a: string) => lines.push(`  • ${a}`));
+    }
+  });
+  return lines.join('\n');
+}
+
 export function useLiveAgent(
   onMessage?: (msg: string) => void,
   onUserSpeech?: (msg: string) => void,
@@ -27,21 +46,49 @@ export function useLiveAgent(
     let accessToken: string | null = null;
     let refreshToken: string | null = null;
     let fitSummary: any = null;
+    let sessionHistory: string = '';
 
     try {
-      const[tokenRes, fitRes] = await Promise.all([
-        fetch('/api/auth/token'),
-        fetch('/api/fitness/summary', { signal: AbortSignal.timeout(3000) }) 
-      ]);
+      // Step 1: get userId (needed for session history fetch)
+      let userId: string | null = null;
+      try {
+        const userRes = await fetch('/api/user');
+        if (userRes.ok) {
+          const userData = await userRes.json();
+          userId = userData.userId || null;
+        }
+      } catch (_) {}
 
-      if (tokenRes.ok) {
-        const t = await tokenRes.json();
+      // Step 2: fetch token, fit summary, and session history in parallel
+      const fetches: Promise<any>[] = [
+        fetch('/api/auth/token'),
+        fetch('/api/fitness/summary', { signal: AbortSignal.timeout(3000) }),
+      ];
+      if (userId) {
+        fetches.push(fetch(`/api/sessions?userId=${encodeURIComponent(userId)}`));
+      }
+
+      const results = await Promise.allSettled(fetches);
+
+      const tokenResult = results[0];
+      if (tokenResult.status === 'fulfilled' && tokenResult.value.ok) {
+        const t = await tokenResult.value.json();
         accessToken = t.accessToken;
         refreshToken = t.refreshToken;
       }
-      if (fitRes.ok) {
-        const f = await fitRes.json();
+
+      const fitResult = results[1];
+      if (fitResult.status === 'fulfilled' && fitResult.value.ok) {
+        const f = await fitResult.value.json();
         fitSummary = f.fitSummary;
+      }
+
+      if (userId && results[2]) {
+        const sessionsResult = results[2];
+        if (sessionsResult.status === 'fulfilled' && sessionsResult.value.ok) {
+          const s = await sessionsResult.value.json();
+          sessionHistory = formatSessionHistory(s.sessions || []);
+        }
       }
     } catch (e) {
       console.warn('Pre-flight data fetch failed, proceeding with defaults');
@@ -52,15 +99,16 @@ export function useLiveAgent(
     socket.onopen = () => {
       if (disposedRef.current) { socket.close(); return; }
       setStatus('connected');
-      
-      socket.send(JSON.stringify({ 
-        type: 'session_start', 
+
+      socket.send(JSON.stringify({
+        type: 'session_start',
         sessionId: 'hack-' + Date.now(),
         accessToken,
         refreshToken,
-        fitSummary
+        fitSummary,
+        sessionHistory,
       }));
-      
+
       if (videoElement) {
         frameIntervalRef.current = setInterval(() => {
           const canvas = document.createElement('canvas');
@@ -68,9 +116,9 @@ export function useLiveAgent(
           const ctx = canvas.getContext('2d');
           ctx?.drawImage(videoElement, 0, 0, 480, 360);
           if (socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ 
-              type: 'frame', 
-              data: canvas.toDataURL('image/jpeg', 0.4).split(',')[1] 
+            socket.send(JSON.stringify({
+              type: 'frame',
+              data: canvas.toDataURL('image/jpeg', 0.4).split(',')[1]
             }));
           }
         }, 1000);
@@ -81,7 +129,6 @@ export function useLiveAgent(
       try {
         const data = JSON.parse(event.data);
         if (data.type === 'agent_speech_chunk') {
-          // Discard audio that arrives after user interrupted
           if (isInterruptedRef.current) return;
           const binary = atob(data.data);
           const bytes = new Int16Array(new Uint8Array(binary.split('').map(c => c.charCodeAt(0))).buffer);
@@ -100,7 +147,6 @@ export function useLiveAgent(
           const startTime = Math.max(nextAudioStartTimeRef.current, audioCtx.currentTime);
           source.start(startTime);
           nextAudioStartTimeRef.current = startTime + buffer.duration;
-          // Track source for interruption
           activeSourcesRef.current.push(source);
           source.onended = () => {
             activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== source);
@@ -108,7 +154,6 @@ export function useLiveAgent(
         } else if (data.type === 'agent_speech_text' && onMessage) {
           onMessage(data.text);
         } else if (data.type === 'agent_speech_end') {
-          // Turn complete — allow audio playback for next turn
           isInterruptedRef.current = false;
         } else if (data.type === 'user_speech_text' && onUserSpeech) {
           onUserSpeech(data.text);
@@ -123,7 +168,7 @@ export function useLiveAgent(
       if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
     };
     socketRef.current = socket;
-  },[onMessage, onUserSpeech, onEmailNeeded]);
+  }, [onMessage, onUserSpeech, onEmailNeeded]);
 
   const startMicrophone = useCallback(async (stream: MediaStream) => {
     streamRef.current = stream;
@@ -136,12 +181,10 @@ export function useLiveAgent(
       micProcessorRef.current = processor;
       processor.onaudioprocess = (e) => {
         const input = e.inputBuffer.getChannelData(0);
-        // Voice Activity Detection: interrupt agent when user speaks
         let sumSq = 0;
         for (let i = 0; i < input.length; i++) sumSq += input[i] * input[i];
         const rms = Math.sqrt(sumSq / input.length);
         if (rms > 0.02 && activeSourcesRef.current.length > 0) {
-          // User is speaking while agent audio is playing — interrupt
           activeSourcesRef.current.forEach(s => { try { s.stop(); } catch (_) {} });
           activeSourcesRef.current = [];
           nextAudioStartTimeRef.current = 0;
@@ -157,14 +200,13 @@ export function useLiveAgent(
       source.connect(processor);
       processor.connect(audioCtx.destination);
     } catch (e) { console.warn("Mic init failed", e); }
-  },[]);
+  }, []);
 
   const disconnect = useCallback(() => {
     disposedRef.current = true;
     if (frameIntervalRef.current) { clearInterval(frameIntervalRef.current); frameIntervalRef.current = null; }
     socketRef.current?.close();
-    
-    // Kill the processor callback first to stop it from holding things alive
+
     if (micProcessorRef.current) {
       micProcessorRef.current.onaudioprocess = null;
       try { micProcessorRef.current.disconnect(); } catch (e) {}
@@ -178,8 +220,7 @@ export function useLiveAgent(
       micAudioCtxRef.current.close().catch(() => {});
       micAudioCtxRef.current = null;
     }
-    
-    // Stop all queued playback sources and close context
+
     activeSourcesRef.current.forEach(s => { try { s.stop(); } catch (_) {} });
     activeSourcesRef.current = [];
     isInterruptedRef.current = false;
@@ -188,24 +229,20 @@ export function useLiveAgent(
       audioCtxRef.current = null;
     }
 
-    // NUCLEAR: Stop all tracks on the stream directly from the hook
     if (streamRef.current) {
-      streamRef.current.getTracks().forEach(t => {
-        try { t.stop(); } catch (e) {}
-      });
+      streamRef.current.getTracks().forEach(t => { try { t.stop(); } catch (e) {} });
       streamRef.current = null;
     }
-  },[]);
+  }, []);
 
   const sendPrompt = (text: string) => {
     if (socketRef.current?.readyState === WebSocket.OPEN) {
       socketRef.current.send(JSON.stringify({ type: 'user_prompt', text }));
     }
-  }
+  };
 
   const sendEmailResponse = async (email: string) => {
     if (socketRef.current?.readyState === WebSocket.OPEN) {
-      // Fetch a fresh access token before sending
       let freshToken: string | null = null;
       try {
         const res = await fetch('/api/auth/token');
@@ -216,7 +253,7 @@ export function useLiveAgent(
       } catch (e) {}
       socketRef.current.send(JSON.stringify({ type: 'email_response', email, accessToken: freshToken }));
     }
-  }
+  };
 
   return { status, connect, disconnect, sendPrompt, sendEmailResponse, startMicrophone };
 }

@@ -34,7 +34,8 @@ Keep internal thoughts in **bold** and your spoken response as plain text.
 EMAIL TOOL INSTRUCTIONS: When the user asks you to send or draft an email, you MUST immediately call the draft_doctor_email tool WITHOUT asking the user for a recipient email address. Use "pending" as the recipient_email. The system will prompt the user to type the email address separately. Do NOT ask the user to say the email address verbally. Just call the tool right away with the subject and body ready.
 PHONE CALLING: When the user asks you to call a doctor/pharmacist immediately, say that after ending the session, they will have the option to deploy a call agent. Ask for details on what they are calling about if not yet provided.
 SOURCES: When the user asks you what sources you used, claim you are using Vertex AI to ground results. After ending the session, users will also be able to see all related sources and articles.
-NEARBY RESOURCES: When the user asks about nearby resources, tell them you are using Google Places API and after ending the session, they can see nearby pharmacies and clinics.`;
+NEARBY RESOURCES: When the user asks about nearby resources, tell them you are using Google Places API and after ending the session, they can see nearby pharmacies and clinics.
+PAST SESSIONS: You have been provided with the user's past session history below. Always reference it when relevant — mention if symptoms are recurring, if action items were completed, or if there are patterns across sessions.`;
 
 const safeSend = (target: any, payload: object) => {
   if (target && target.readyState === 1) {
@@ -78,9 +79,12 @@ wss.on('connection', (ws: any) => {
           currentAccessToken = data.accessToken || null;
           currentRefreshToken = data.refreshToken || null;
           const fitContext = data.fitSummary
-            ? `\n\n[USER HEALTH DATA]\n${data.fitSummary.summaryText}`
-            : "\n\n[USER HEALTH DATA]\nNo Google Fit data connected.";
+          ? `\n\n[USER HEALTH DATA]\n${data.fitSummary.summaryText}`
+          : "\n\n[USER HEALTH DATA]\nNo Google Fit data connected.";
 
+          const historyContext = data.sessionHistory
+  ? `\n\nYou have access to this user's past session history. Use it to personalize your responses, reference previous concerns, and track progress over time:\n\n${data.sessionHistory}`
+  : '';
           const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${process.env.GENAI_API_KEY}`;
           geminiSocket = new WSClient(wsUrl);
 
@@ -95,7 +99,7 @@ wss.on('connection', (ws: any) => {
                   ]
                 }],
                 generation_config: { response_modalities: ["audio"] },
-                system_instruction: { role: "system", parts: [{ text: SYSTEM_PROMPT + fitContext }] }
+                system_instruction: { role: "system", parts: [{ text: SYSTEM_PROMPT + fitContext + historyContext }] }
               }
             };
             safeSend(geminiSocket, setupMessage);
