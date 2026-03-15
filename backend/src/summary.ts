@@ -41,18 +41,22 @@ app.use(bodyParser.json({ limit: '5mb' }));
 const SYSTEM_PROMPT = `You summarize medical AI assistant sessions.
 You will receive a transcript of a conversation between a user and an AI health assistant.
 
-Return ONLY a JSON object with exactly two keys:
-- "summary": an array of 3-4 short bullet-point strings summarizing what actually happened in the call (what the user reported, what the assistant advised, etc.)
-- "actionItems": an array of 1-3 short actionable follow-up strings the user should do after this call (e.g. "Schedule follow-up with cardiologist", "Monitor blood pressure daily for 1 week"). If there are no clear action items, return an empty array.
+Write 3-4 concise bullet points summarizing what happened in the call.
+Then write a line that says "ACTION ITEMS:" followed by 1-3 short actionable follow-ups (or "None" if there are none).
 
 Rules:
-- Do NOT invent anything not explicitly present in the transcript.
+- Be concise. Each bullet should be one short sentence.
+- Do NOT invent anything not in the transcript.
 - Do NOT mention medications unless the transcript explicitly discusses them.
-- If the transcript is very short or nearly empty, return fewer bullets.
-- Return ONLY the JSON object, nothing else — no markdown, no backticks, no preamble.
+- Do NOT use markdown, JSON, or any formatting besides plain text with dashes.
 
-Example output:
-{"summary":["User reported persistent cough for 2 weeks","Assistant suggested monitoring symptoms and staying hydrated","No medications discussed"],"actionItems":["Follow up with primary care physician if cough persists beyond 2 more weeks","Track symptom severity daily"]}`;
+Example:
+- User reported persistent cough for 2 weeks
+- Assistant suggested monitoring symptoms and staying hydrated
+- No medications were discussed
+ACTION ITEMS:
+- Follow up with doctor if cough persists beyond 2 more weeks
+- Track symptom severity daily`;
 
 // ── POST /summarize ────────────────────────────────────────────────────────
 app.post('/summarize', async (req, res) => {
@@ -85,21 +89,21 @@ app.post('/summarize', async (req, res) => {
       { name: 'N/A', type: 'N/A', purpose: 'N/A', dosage: 'N/A', status: 'safe' as const },
     ];
 
-    try {
-      const cleaned = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
-      const parsed = JSON.parse(cleaned);
-      if (Array.isArray(parsed)) {
-        // Legacy: model returned bare array — treat as summary only
-        summary = parsed.map(String);
-      } else if (parsed && typeof parsed === 'object') {
-        summary = Array.isArray(parsed.summary) ? parsed.summary.map(String) : [];
-        actionItems = Array.isArray(parsed.actionItems) ? parsed.actionItems.map(String) : [];
-      }
-    } catch (e) {
-      // Fallback: split raw text into summary bullets
-      summary = raw.split('\n').map((l: string) => l.replace(/^[\-•\d.)\s]+/, '').trim()).filter(Boolean);
-      if (summary.length === 0) summary = [raw];
-    }
+    // Parse plain-text bullets split by ACTION ITEMS:
+    const parts = raw.split(/ACTION\s*ITEMS\s*:/i);
+    const summaryPart = parts[0] || '';
+    const actionsPart = parts[1] || '';
+
+    summary = summaryPart
+      .split('\n')
+      .map((l: string) => l.replace(/^[\-•*\d.)\s]+/, '').trim())
+      .filter((l: string) => l.length > 0 && l.toLowerCase() !== 'none');
+    if (summary.length === 0 && raw) summary = [raw];
+
+    actionItems = actionsPart
+      .split('\n')
+      .map((l: string) => l.replace(/^[\-•*\d.)\s]+/, '').trim())
+      .filter((l: string) => l.length > 0 && l.toLowerCase() !== 'none');
 
     // ── Firestore write ────────────────────────────────────────────────────
     if (db) {
@@ -182,15 +186,14 @@ app.get('/sessions/:userId', async (req, res) => {
 });
 
 // ── POST /articles ─────────────────────────────────────────────────────────
-const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
+const TAVILY_API_KEY = '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';
 
 const KEYWORDS_SYSTEM_PROMPT = `You extract search keywords from medical session summaries.
-Given a session summary (array of bullet points and action items), produce 3-5 focused search queries
-that would find relevant health articles. Focus on the specific conditions, medications, and topics mentioned.
-Append "site:health.google.com OR site:health.google OR site:blog.google/health" to each query so results come from Google health sources.
+Given a session summary (bullet points and action items), produce 3-5 short search queries
+that would find relevant health and medical articles. Focus on the specific conditions, medications, symptoms, and topics mentioned.
 
 Return ONLY a JSON array of query strings, nothing else. No markdown, no backticks.
-Example: ["metformin drug interactions site:health.google.com OR site:health.google OR site:blog.google/health","managing type 2 diabetes site:health.google.com OR site:health.google OR site:blog.google/health"]`;
+Example: ["metformin drug interactions","managing type 2 diabetes","blood pressure monitoring tips"]`;
 
 app.post('/articles', async (req, res) => {
   const { summary, actionItems } = req.body || {};
@@ -228,7 +231,7 @@ app.post('/articles', async (req, res) => {
       queries = JSON.parse(cleaned);
       if (!Array.isArray(queries)) throw new Error('not an array');
     } catch {
-      queries = [bullets[0] + ' health article site:health.google.com'];
+      queries = [bullets[0] + ' health article'];
     }
 
     console.log(`🔍 Article search queries:`, queries);

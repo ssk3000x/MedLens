@@ -206,6 +206,8 @@ wss.on('connection', (ws: any) => {
 // ─── Voice Agent Route (merged from vapi.ts) ────────────────────────────────
 app.post('/deploy-voice-agent', async (req, res) => {
   const { phoneNumber, sessionSummary } = req.body;
+  const recipientTypeRaw = (req.body.recipientType || 'Doctor');
+  const recipientType = typeof recipientTypeRaw === 'string' && recipientTypeRaw.toLowerCase().includes('pharm') ? 'Pharmacist' : 'Doctor';
 
   if (!phoneNumber || typeof phoneNumber !== 'string') {
     return res.status(400).json({ error: 'Phone number is required' });
@@ -226,7 +228,12 @@ app.post('/deploy-voice-agent', async (req, res) => {
 
   const summaryContext = sessionSummary || 'No session summary available.';
 
-  const systemPrompt = `You are MedLens Voice Agent. You call doctors' offices on behalf of patients to clarify prescriptions, resolve medication questions, and relay session findings. Be EXTREMELY concise — no filler, no pleasantries beyond a brief greeting. Get straight to the point.
+  // Tailor the prompt for recipient type (Pharmacist vs Doctor)
+  const tailoredIntro = recipientType === 'Pharmacist'
+    ? 'You are calling a pharmacy staff member. Focus on prescription fulfillment, refill status, prescription identifiers, insurance/billing issues, and any pharmacist-specific clarifications. Ask concise, actionable questions the pharmacy can answer.'
+    : "You are calling a physician's office or clinical staff. Focus on clinical clarifications, medication instructions, dosing, and follow-up recommendations. Ask concise clinical questions for the provider to act on.";
+
+  const systemPrompt = `You are MedLens Voice Agent. ${recipientType} call. ${tailoredIntro} Be EXTREMELY concise — no filler, no pleasantries beyond a brief greeting. Get straight to the point.
 
 Rules:
 - Max 1-2 sentences per turn. Never ramble.
@@ -236,10 +243,14 @@ Rules:
 - Ask for confirmation or next steps, then wrap up.
 - If they need to transfer you or call back, accept and end promptly.
 
+Call Type: ${recipientType}
+
 Patient Session Summary:
 ${summaryContext}`;
 
-  const firstMessage = `Hi, this is MedLens calling on behalf of a patient regarding their prescription. Do you have a moment to clarify a few details?`;
+  const firstMessage = recipientType === 'Pharmacist'
+    ? `Hi, this is MedLens calling on behalf of a patient regarding a prescription at your pharmacy. Do you have a moment to confirm refill/fulfillment details?`
+    : `Hi, this is MedLens calling on behalf of a patient regarding their prescription. Do you have a moment to clarify a few details?`;
 
   try {
     const response = await fetch('https://api.vapi.ai/call/phone', {
