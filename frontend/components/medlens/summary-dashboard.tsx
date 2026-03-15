@@ -19,6 +19,10 @@ import {
   Loader2,
   ExternalLink,
   Tag,
+  Download,
+  Phone,
+  User,
+  MapPin,
 } from "lucide-react"
 import {
   Dialog,
@@ -65,6 +69,7 @@ function CallHistoryGrid({ userId }: { userId: string }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [filter, setFilter] = useState<'all' | 'one-on-one' | 'deployed'>('all')
 
   useEffect(() => {
     if (!userId) return
@@ -73,11 +78,22 @@ function CallHistoryGrid({ userId }: { userId: string }) {
       .then((r) => r.json())
       .then((data) => {
         if (data.error) throw new Error(data.error)
-        setSessions(data.sessions || [])
+        const sorted = (data.sessions || []).sort((a: SessionRecord, b: SessionRecord) => {
+          const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0
+          const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0
+          return tb - ta
+        })
+        setSessions(sorted)
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false))
   }, [userId])
+
+  const filtered = sessions.filter((s) => {
+    if (filter === 'one-on-one') return s.method === 'claude' || s.method === 'gemini' || !s.method || s.method === 'unknown'
+    if (filter === 'deployed') return s.method === 'vapi' || s.method === 'voice-agent'
+    return true
+  })
 
   if (loading) {
     return (
@@ -107,91 +123,128 @@ function CallHistoryGrid({ userId }: { userId: string }) {
   }
 
   return (
-    <div className="grid grid-cols-1 gap-3">
-      {sessions.map((session) => {
-        const isExpanded = expandedId === session.sessionId
-        return (
-          <div
-            key={session.sessionId}
-            className="rounded-2xl border border-border bg-card overflow-hidden transition-shadow hover:shadow-md"
+    <div className="flex flex-col gap-4">
+      {/* Filter tabs */}
+      <div className="flex items-center gap-1 p-1 rounded-lg bg-muted w-fit">
+        {[
+          { key: 'all' as const, label: 'All' },
+          { key: 'one-on-one' as const, label: 'One-on-One', icon: <User className="size-3" /> },
+          { key: 'deployed' as const, label: 'Deployed Calls', icon: <Phone className="size-3" /> },
+        ].map((tab) => (
+          <button
+            key={tab.key}
+            onClick={() => setFilter(tab.key)}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all cursor-pointer ${
+              filter === tab.key
+                ? 'bg-background text-foreground shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
           >
-            {/* Card header — always visible */}
-            <button
-              className="w-full flex items-start justify-between gap-4 px-5 py-4 text-left cursor-pointer"
-              onClick={() => setExpandedId(isExpanded ? null : session.sessionId)}
-            >
-              <div className="flex flex-col gap-1 min-w-0">
-                <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <CalendarDays className="size-3.5 flex-shrink-0" />
-                  <span>{formatDate(session.timestamp)}</span>
-                  {session.timestamp && (
-                    <>
-                      <span className="text-border">·</span>
-                      <Clock className="size-3.5 flex-shrink-0" />
-                      <span>{formatTime(session.timestamp)}</span>
-                    </>
-                  )}
-                </div>
-                {/* First summary bullet as preview */}
-                {session.summary[0] && (
-                  <p className="text-sm text-foreground font-medium leading-snug truncate">
-                    {session.summary[0]}
-                  </p>
-                )}
-                {/* Action items badge */}
-                {session.actionItems.length > 0 && (
-                  <div className="flex items-center gap-1.5 mt-0.5">
-                    <ListChecks className="size-3 text-primary" />
-                    <span className="text-[11px] text-primary font-medium">
-                      {session.actionItems.length} action item{session.actionItems.length > 1 ? 's' : ''}
-                    </span>
+            {tab.icon}
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {filtered.length === 0 ? (
+        <div className="flex flex-col items-center gap-2 py-8 text-muted-foreground text-sm">
+          <History className="size-6 opacity-30" />
+          <p>No {filter === 'deployed' ? 'deployed call' : 'one-on-one'} sessions found.</p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {filtered.map((session) => {
+            const isExpanded = expandedId === session.sessionId
+            const isDeployed = session.method === 'vapi' || session.method === 'voice-agent'
+            return (
+              <div
+                key={session.sessionId}
+                className={`rounded-2xl border overflow-hidden transition-shadow hover:shadow-md ${
+                  isExpanded ? 'bg-card border-primary/30 sm:col-span-2' : 'bg-card border-border'
+                }`}
+              >
+                <button
+                  className="w-full flex items-start justify-between gap-3 px-4 py-3.5 text-left cursor-pointer"
+                  onClick={() => setExpandedId(isExpanded ? null : session.sessionId)}
+                >
+                  <div className="flex flex-col gap-1 min-w-0">
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <div className={`flex items-center justify-center size-5 rounded-full flex-shrink-0 ${
+                        isDeployed ? 'bg-violet-500/10 text-violet-500' : 'bg-primary/10 text-primary'
+                      }`}>
+                        {isDeployed ? <Phone className="size-2.5" /> : <User className="size-2.5" />}
+                      </div>
+                      <span>{formatDate(session.timestamp)}</span>
+                      {session.timestamp && (
+                        <>
+                          <span className="text-border">·</span>
+                          <span>{formatTime(session.timestamp)}</span>
+                        </>
+                      )}
+                    </div>
+                    {session.summary[0] && (
+                      <p className="text-sm text-foreground font-medium leading-snug truncate">
+                        {session.summary[0]}
+                      </p>
+                    )}
+                    <div className="flex items-center gap-3 mt-0.5">
+                      <span className={`text-[10px] font-medium uppercase tracking-wider px-1.5 py-0.5 rounded ${
+                        isDeployed ? 'bg-violet-500/10 text-violet-500' : 'bg-primary/10 text-primary'
+                      }`}>
+                        {isDeployed ? 'Deployed' : 'One-on-One'}
+                      </span>
+                      {session.actionItems.length > 0 && (
+                        <div className="flex items-center gap-1">
+                          <ListChecks className="size-3 text-primary" />
+                          <span className="text-[10px] text-primary font-medium">
+                            {session.actionItems.length} action item{session.actionItems.length > 1 ? 's' : ''}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex-shrink-0 mt-1 text-muted-foreground">
+                    {isExpanded ? <ChevronUp className="size-4" /> : <ChevronDown className="size-4" />}
+                  </div>
+                </button>
+
+                {isExpanded && (
+                  <div className="px-4 pb-4 flex flex-col gap-4 border-t border-border pt-3">
+                    <div>
+                      <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">
+                        Session Summary
+                      </h4>
+                      <ul className="flex flex-col gap-2">
+                        {session.summary.map((bullet, i) => (
+                          <li key={i} className="flex items-start gap-2.5 text-sm text-muted-foreground leading-relaxed">
+                            <span className="mt-1.5 size-1.5 rounded-full bg-primary flex-shrink-0" />
+                            {bullet}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                    {session.actionItems.length > 0 && (
+                      <div>
+                        <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">
+                          Action Items
+                        </h4>
+                        <ul className="flex flex-col gap-2">
+                          {session.actionItems.map((item, i) => (
+                            <li key={i} className="flex items-start gap-2.5 text-sm text-muted-foreground leading-relaxed">
+                              <CheckCircle2 className="size-3.5 mt-0.5 text-primary flex-shrink-0" />
+                              {item}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
-              <div className="flex-shrink-0 mt-1 text-muted-foreground">
-                {isExpanded ? <ChevronUp className="size-4" /> : <ChevronDown className="size-4" />}
-              </div>
-            </button>
-
-            {/* Expanded detail */}
-            {isExpanded && (
-              <div className="px-5 pb-5 flex flex-col gap-4 border-t border-border pt-4">
-                {/* Summary bullets */}
-                <div>
-                  <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">
-                    Session Summary
-                  </h4>
-                  <ul className="flex flex-col gap-2">
-                    {session.summary.map((bullet, i) => (
-                      <li key={i} className="flex items-start gap-2.5 text-sm text-muted-foreground leading-relaxed">
-                        <span className="mt-1.5 size-1.5 rounded-full bg-primary flex-shrink-0" />
-                        {bullet}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-
-                {/* Action items */}
-                {session.actionItems.length > 0 && (
-                  <div>
-                    <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">
-                      Action Items
-                    </h4>
-                    <ul className="flex flex-col gap-2">
-                      {session.actionItems.map((item, i) => (
-                        <li key={i} className="flex items-start gap-2.5 text-sm text-muted-foreground leading-relaxed">
-                          <CheckCircle2 className="size-3.5 mt-0.5 text-primary flex-shrink-0" />
-                          {item}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        )
-      })}
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }
@@ -276,7 +329,7 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
         </div>
       </header>
 
-      <main className="px-6 py-8 max-w-5xl mx-auto flex flex-col gap-8">
+      <main className="px-6 py-8 max-w-6xl mx-auto flex flex-col gap-8">
         {/* AI Disclaimer */}
         <div className="flex items-start gap-3 p-4 rounded-xl border border-border bg-warning/10">
           <AlertTriangle className="size-5 text-warning-foreground flex-shrink-0 mt-0.5" />
@@ -285,63 +338,153 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
           </p>
         </div>
 
-        {/* Current session summary */}
-        {summaryBullets.length > 0 ? (
-          <div className="flex flex-col items-start gap-3 p-6 rounded-2xl bg-card border border-border">
-            <h2 className="text-lg font-semibold text-foreground">This Session</h2>
-            <ul className="flex flex-col gap-2.5 w-full">
-              {summaryBullets.map((line: string, i: number) => (
-                <li key={i} className="flex items-start gap-3 text-sm text-muted-foreground leading-relaxed">
-                  <span className="mt-1 size-1.5 rounded-full bg-primary flex-shrink-0" />
-                  {line}
-                </li>
-              ))}
-            </ul>
-
-            {/* Action items for this session */}
-            {runtimeActionItems.length > 0 && (
-              <div className="w-full mt-2 pt-4 border-t border-border">
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">
-                  Action Items
-                </h3>
-                <ul className="flex flex-col gap-2">
-                  {runtimeActionItems.map((item: string, i: number) => (
-                    <li key={i} className="flex items-start gap-2.5 text-sm text-muted-foreground leading-relaxed">
-                      <CheckCircle2 className="size-3.5 mt-0.5 text-primary flex-shrink-0" />
-                      {item}
+        {/* Session Summary + Quick Actions — side by side on desktop */}
+        <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
+          {/* Left column: Session summary (takes 3/5 width) */}
+          <div className="lg:col-span-3">
+            {summaryBullets.length > 0 ? (
+              <div className="flex flex-col items-start gap-3 p-6 rounded-2xl bg-card border border-border h-full">
+                <h2 className="text-lg font-semibold text-foreground">This Session</h2>
+                <ul className="flex flex-col gap-2.5 w-full">
+                  {summaryBullets.map((line: string, i: number) => (
+                    <li key={i} className="flex items-start gap-3 text-sm text-muted-foreground leading-relaxed">
+                      <span className="mt-1 size-1.5 rounded-full bg-primary flex-shrink-0" />
+                      {line}
                     </li>
                   ))}
                 </ul>
+
+                {/* Action items for this session */}
+                {runtimeActionItems.length > 0 && (
+                  <div className="w-full mt-2 pt-4 border-t border-border">
+                    <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">
+                      Action Items
+                    </h3>
+                    <ul className="flex flex-col gap-2">
+                      {runtimeActionItems.map((item: string, i: number) => (
+                        <li key={i} className="flex items-start gap-2.5 text-sm text-muted-foreground leading-relaxed">
+                          <CheckCircle2 className="size-3.5 mt-0.5 text-primary flex-shrink-0" />
+                          {item}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {runtimeTranscript && runtimeTranscript.length > 0 && (
+                  <details className="mt-2 text-xs text-muted-foreground w-full">
+                    <summary className="cursor-pointer">View transcript ({runtimeTranscript.length} lines)</summary>
+                    <div className="mt-2">
+                      {runtimeTranscript.map((t: any, i: number) => (
+                        <p key={i} className="text-xs py-1 border-b border-border">
+                          <strong className="uppercase text-[10px] tracking-wider mr-2">{t.speaker}</strong>
+                          {t.text}
+                        </p>
+                      ))}
+                    </div>
+                  </details>
+                )}
+              </div>
+            ) : (
+              <div className="flex flex-col items-center gap-3 p-8 rounded-2xl bg-primary/5 border border-primary/20 h-full justify-center">
+                <div className="flex items-center justify-center size-16 rounded-full bg-primary/10">
+                  <ShieldCheck className="size-8 text-primary" />
+                </div>
+                <h2 className="text-xl font-bold text-foreground">No Critical Interactions Found</h2>
+                <p className="text-sm text-muted-foreground text-center max-w-md">
+                  All 3 detected medications have been cross-checked against FDA databases. One minor note was flagged for your awareness.
+                </p>
               </div>
             )}
+          </div>
 
-            {runtimeTranscript && runtimeTranscript.length > 0 && (
-              <details className="mt-2 text-xs text-muted-foreground w-full">
-                <summary className="cursor-pointer">View transcript ({runtimeTranscript.length} lines)</summary>
-                <div className="mt-2">
-                  {runtimeTranscript.map((t: any, i: number) => (
-                    <p key={i} className="text-xs py-1 border-b border-border">
-                      <strong className="uppercase text-[10px] tracking-wider mr-2">{t.speaker}</strong>
-                      {t.text}
-                    </p>
-                  ))}
-                </div>
-              </details>
-            )}
-            <DeployVoiceAgentButton deployed={deployed} onClick={() => { if (!deployed) setPhoneDialogOpen(true) }} />
-          </div>
-        ) : (
-          <div className="flex flex-col items-center gap-3 p-8 rounded-2xl bg-primary/5 border border-primary/20">
-            <div className="flex items-center justify-center size-16 rounded-full bg-primary/10">
-              <ShieldCheck className="size-8 text-primary" />
+          {/* Right column: Quick Actions (takes 2/5 width) */}
+          <div className="lg:col-span-2">
+            <div className="flex flex-col gap-3 h-full">
+              <h2 className="text-lg font-semibold text-foreground text-center">Quick Actions</h2>
+              <div className="grid grid-cols-2 gap-3 flex-1">
+                <ActionCard
+                  icon={<BookOpen className="size-5" />}
+                  title="View Related Articles"
+                  description="Browse curated medical articles related to your session"
+                  onClick={async () => {
+                    setArticlesOpen(true)
+                    setArticlesLoading(true)
+                    setArticlesError(null)
+                    try {
+                      const res = await fetch('/api/articles', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ summary: summaryBullets, actionItems: runtimeActionItems }),
+                      })
+                      const data = await res.json()
+                      if (data.error) throw new Error(data.error)
+                      setArticles(data.articles || [])
+                    } catch (e: any) {
+                      setArticlesError(e.message || 'Failed to load articles')
+                    } finally {
+                      setArticlesLoading(false)
+                    }
+                  }}
+                />
+                <ActionCard
+                  icon={<Download className="size-5" />}
+                  title="Export as PDF"
+                  description="Download session summary as a PDF report"
+                  onClick={() => {
+                    const doc = document.createElement('div')
+                    doc.style.cssText = 'font-family:system-ui,sans-serif;color:#111;max-width:700px;margin:0 auto;padding:40px'
+
+                    const title = `<h1 style="font-size:22px;margin-bottom:4px">MedLens Session Report</h1>`
+                    const date = `<p style="font-size:13px;color:#666;margin-bottom:24px">${new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })} at ${new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</p>`
+                    const disclaimer = `<div style="background:#fff8e1;border:1px solid #ffe082;border-radius:8px;padding:12px;font-size:12px;color:#856404;margin-bottom:24px">⚠ This summary was generated by an AI assistant and has not been reviewed by a medical professional.</div>`
+
+                    let summaryHtml = ''
+                    if (summaryBullets.length > 0) {
+                      summaryHtml = `<h2 style="font-size:16px;margin-bottom:8px">Session Summary</h2><ul style="padding-left:18px;margin-bottom:20px">${summaryBullets.map(b => `<li style="font-size:13px;color:#444;margin-bottom:6px;line-height:1.5">${b}</li>`).join('')}</ul>`
+                    }
+
+                    let actionsHtml = ''
+                    if (runtimeActionItems.length > 0) {
+                      actionsHtml = `<h2 style="font-size:16px;margin-bottom:8px">Action Items</h2><ul style="padding-left:18px;margin-bottom:20px">${runtimeActionItems.map(a => `<li style="font-size:13px;color:#444;margin-bottom:6px;line-height:1.5">✓ ${a}</li>`).join('')}</ul>`
+                    }
+
+                    let transcriptHtml = ''
+                    if (runtimeTranscript && runtimeTranscript.length > 0) {
+                      transcriptHtml = `<h2 style="font-size:16px;margin-bottom:8px">Transcript</h2><div style="border:1px solid #e5e7eb;border-radius:8px;padding:12px;margin-bottom:20px">${runtimeTranscript.map((t: any) => `<p style="font-size:12px;margin:4px 0;color:#555"><strong style="text-transform:uppercase;font-size:10px;letter-spacing:0.5px;margin-right:6px">${t.speaker}</strong>${t.text}</p>`).join('')}</div>`
+                    }
+
+                    const footer = `<hr style="border:none;border-top:1px solid #e5e7eb;margin:24px 0 12px"/><p style="font-size:11px;color:#999;text-align:center">Generated by MedLens · Not a substitute for professional medical advice</p>`
+
+                    doc.innerHTML = title + date + disclaimer + summaryHtml + actionsHtml + transcriptHtml + footer
+
+                    const printWindow = window.open('', '_blank')
+                    if (printWindow) {
+                      printWindow.document.write(`<!DOCTYPE html><html><head><title>MedLens Report</title><style>@media print{@page{margin:20mm}body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}</style></head><body>${doc.innerHTML}</body></html>`)
+                      printWindow.document.close()
+                      setTimeout(() => { printWindow.print(); printWindow.close() }, 300)
+                    }
+                  }}
+                />
+                <ActionCard
+                  icon={<GeminiIcon className="size-5" />}
+                  title="Deploy Gemini Voice Agent"
+                  description="Deploy an AI voice agent to call with medication reminders"
+                  onClick={() => { if (!deployed) setPhoneDialogOpen(true) }}
+                  disabled={deployed}
+                />
+                <ActionCard
+                  icon={<MapPin className="size-5" />}
+                  title="Find Nearby Resources"
+                  description="Locate pharmacies and clinics near you"
+                  onClick={() => {
+                    window.open('https://www.google.com/maps/search/pharmacy+OR+clinic+near+me', '_blank', 'noopener,noreferrer')
+                  }}
+                />
+              </div>
             </div>
-            <h2 className="text-xl font-bold text-foreground">No Critical Interactions Found</h2>
-            <p className="text-sm text-muted-foreground text-center max-w-md">
-              All 3 detected medications have been cross-checked against FDA databases. One minor note was flagged for your awareness.
-            </p>
-            <DeployVoiceAgentButton deployed={deployed} onClick={() => { if (!deployed) setPhoneDialogOpen(true) }} />
           </div>
-        )}
+        </div>
 
         {/* Call History Grid */}
         <section className="flex flex-col gap-4">
@@ -357,55 +500,6 @@ export function SummaryDashboard({ onBack, summary }: { onBack: () => void; summ
               Connect Google Fit to load your call history.
             </div>
           )}
-        </section>
-
-        {/* Quick Actions */}
-        <section className="flex flex-col gap-4">
-          <h2 className="text-lg font-semibold text-foreground">Quick Actions</h2>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <ActionCard
-              icon={<BookOpen className="size-5" />}
-              title="View Related Articles"
-              description="Browse curated medical articles related to your session"
-              onClick={async () => {
-                setArticlesOpen(true)
-                setArticlesLoading(true)
-                setArticlesError(null)
-                try {
-                  const res = await fetch('/api/articles', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ summary: summaryBullets, actionItems: runtimeActionItems }),
-                  })
-                  const data = await res.json()
-                  if (data.error) throw new Error(data.error)
-                  setArticles(data.articles || [])
-                } catch (e: any) {
-                  setArticlesError(e.message || 'Failed to load articles')
-                } finally {
-                  setArticlesLoading(false)
-                }
-              }}
-            />
-            <ActionCard
-              icon={<FileText className="size-5" />}
-              title="Share Schedule"
-              description="Share the medication schedule as a Google Doc"
-            />
-            <ActionCard
-              icon={<GeminiIcon className="size-5" />}
-              title="Deploy Gemini Voice Agent"
-              description="Deploy an AI voice agent to call with medication reminders"
-              onClick={() => { if (!deployed) setPhoneDialogOpen(true) }}
-              disabled={deployed}
-            />
-            <ActionCard
-              icon={<ShoppingBag className="size-5" />}
-              title="Order Refill"
-              description="Connect to your pharmacy portal for refills"
-              disabled
-            />
-          </div>
         </section>
 
         {/* Related Articles Modal */}
@@ -587,22 +681,22 @@ function ActionCard({
     <button
       disabled={disabled}
       onClick={onClick}
-      className={`flex items-start gap-4 p-5 rounded-xl border text-left transition-all cursor-pointer ${
+      className={`flex flex-col items-center justify-center gap-2 p-4 rounded-xl border text-center transition-all cursor-pointer ${
         disabled
           ? "border-border bg-muted opacity-50 cursor-not-allowed"
           : "border-border bg-card hover:shadow-md hover:border-primary/30"
       }`}
     >
-      <div className={`flex items-center justify-center size-10 rounded-lg flex-shrink-0 ${
+      <div className={`flex items-center justify-center size-8 rounded-lg flex-shrink-0 ${
         disabled ? "bg-muted-foreground/10 text-muted-foreground" : "bg-primary/10 text-primary"
       }`}>
         {icon}
       </div>
-      <div className="flex flex-col gap-1">
-        <span className="text-sm font-semibold text-foreground">{title}</span>
-        <span className="text-xs text-muted-foreground leading-relaxed">{description}</span>
+      <div className="flex flex-col gap-0.5 items-center">
+        <span className="text-sm font-semibold text-foreground leading-tight">{title}</span>
+        <span className="text-xs text-muted-foreground leading-snug line-clamp-2">{description}</span>
         {disabled && (
-          <span className="text-[10px] text-muted-foreground uppercase tracking-wider mt-1">Coming Soon</span>
+          <span className="text-[10px] text-muted-foreground uppercase tracking-wider mt-0.5">Coming Soon</span>
         )}
       </div>
     </button>

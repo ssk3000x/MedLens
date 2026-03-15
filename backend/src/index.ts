@@ -228,6 +228,15 @@ app.post('/deploy-voice-agent', async (req, res) => {
 
   const summaryContext = sessionSummary || 'No session summary available.';
 
+  // Sanitize and truncate summary to avoid huge prompts or control characters
+  let safeSummary = String(summaryContext || 'No session summary available.').replace(/\s+/g, ' ').trim();
+  const MAX_SUMMARY_CHARS = 3000;
+  if (safeSummary.length > MAX_SUMMARY_CHARS) {
+    safeSummary = safeSummary.slice(0, MAX_SUMMARY_CHARS - 16) + ' ... (truncated)';
+  }
+  // Escape backticks which might interfere with some downstream tooling
+  safeSummary = safeSummary.replace(/`/g, "'");
+
   // Tailor the prompt for recipient type (Pharmacist vs Doctor)
   const tailoredIntro = recipientType === 'Pharmacist'
     ? 'You are calling a pharmacy staff member. Focus on prescription fulfillment, refill status, prescription identifiers, insurance/billing issues, and any pharmacist-specific clarifications. Ask concise, actionable questions the pharmacy can answer.'
@@ -246,7 +255,7 @@ Rules:
 Call Type: ${recipientType}
 
 Patient Session Summary:
-${summaryContext}`;
+${safeSummary}`;
 
   const firstMessage = recipientType === 'Pharmacist'
     ? `Hi, this is MedLens calling on behalf of a patient regarding a prescription at your pharmacy. Do you have a moment to confirm refill/fulfillment details?`
