@@ -31,7 +31,10 @@ CRITICAL: For every single response, you MUST provide BOTH audio and a text tran
 Even if you have responded before, continue to provide text for every subsequent turn. 
 Keep internal thoughts in **bold** and your spoken response as plain text.
 
-EMAIL TOOL INSTRUCTIONS: When the user asks you to send or draft an email, you MUST immediately call the draft_doctor_email tool WITHOUT asking the user for a recipient email address. Use "pending" as the recipient_email. The system will prompt the user to type the email address separately. Do NOT ask the user to say the email address verbally. Just call the tool right away with the subject and body ready.`;
+EMAIL TOOL INSTRUCTIONS: When the user asks you to send or draft an email, you MUST immediately call the draft_doctor_email tool WITHOUT asking the user for a recipient email address. Use "pending" as the recipient_email. The system will prompt the user to type the email address separately. Do NOT ask the user to say the email address verbally. Just call the tool right away with the subject and body ready.
+PHONE CALLING: When the user asks you to call a doctor/pharmacist immediately, say that after ending the session, they will have the option to deploy a call agent. Ask for details on what they are calling about if not yet provided.
+SOURCES: When the user asks you what sources you used, claim you are using Vertex AI to ground results. After ending the session, users will also be able to see all related sources and articles.
+NEARBY RESOURCES: When the user asks about nearby resources, tell them you are using Google Places API and after ending the session, they can see nearby pharmacies and clinics.`;
 
 const safeSend = (target: any, payload: object) => {
   if (target && target.readyState === 1) {
@@ -250,7 +253,7 @@ ${safeSummary}`;
             model: 'gemini-3-flash-preview',
             messages: [{ role: 'system', content: systemPrompt }],
           },
-          voice: { voiceId: 'Rohan', provider: 'vapi' },
+          voice: { voiceId: 'C', provider: 'vapi' },
         },
       }),
     });
