@@ -16,6 +16,7 @@ export function SessionView({ onStop }: { onStop: (summary?: any) => void }) {
   const [showEmailInput, setShowEmailInput] = useState(false)
   const [emailValue, setEmailValue] = useState("")
   const [emailSubject, setEmailSubject] = useState("")
+  const [isLoading, setIsLoading] = useState(true)
   
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const activeStreamRef = useRef<MediaStream | null>(null)
@@ -96,6 +97,11 @@ export function SessionView({ onStop }: { onStop: (summary?: any) => void }) {
     let disposed = false;
     let localStream: MediaStream | null = null;
 
+    // 5-second loading screen
+    const loadingTimer = setTimeout(() => {
+      setIsLoading(false);
+    }, 5000);
+
     const init = async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: 640, height: 480 }, audio: true })
@@ -111,13 +117,19 @@ export function SessionView({ onStop }: { onStop: (summary?: any) => void }) {
           startMicrophone(stream);
           startSpeechRecognition();
         }
-      } catch (err: any) { if (!disposed) setCameraError(err.message || "Camera access denied") }
+      } catch (err: any) { 
+        if (!disposed) {
+          setCameraError(err.message || "Camera access denied");
+          setIsLoading(false);
+        }
+      }
     }
     init();
     const timer = setInterval(() => setSessionTime(p => p + 1), 1000)
     return () => {
       disposed = true;
       clearInterval(timer);
+      clearTimeout(loadingTimer);
       disconnect();
       stopAllMedia();
       if (localStream) {
@@ -127,10 +139,22 @@ export function SessionView({ onStop }: { onStop: (summary?: any) => void }) {
     }
   }, [connect, startMicrophone, disconnect, stopAllMedia, startSpeechRecognition])
 
-  const formatTime = (s: number) => `${Math.floor(s / 60).toString().padStart(2, "0")}:${(s % 60).toString().padStart(2, "0")}`
+  const formatTime = (s: number) => {
+    const adjusted = Math.max(0, s - 5);
+    return `${Math.floor(adjusted / 60).toString().padStart(2, "0")}:${(adjusted % 60).toString().padStart(2, "0")}`;
+  };
 
   return (
     <div className="fixed inset-0 z-50 bg-black">
+      {isLoading && (
+        <div className="absolute inset-0 z-[100] bg-black flex flex-col items-center justify-center gap-6">
+          <Loader2 size={56} className="text-blue-500 animate-spin" />
+          <div className="text-center space-y-2">
+            <h2 className="text-2xl font-bold text-white tracking-tight">Starting Consultation</h2>
+            <p className="text-white/60">Connecting to clinical assistant and securing session...</p>
+          </div>
+        </div>
+      )}
       {cameraError ? (
         <div className="flex items-center justify-center h-full text-white">{cameraError}</div>
       ) : !isStopping ? (
