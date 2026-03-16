@@ -38,9 +38,17 @@ export function SessionView({ onStop }: { onStop: (summary?: any) => void }) {
 
   const handleAgentMessage = useCallback((msg: string) => {
     addToTranscript({ speaker: 'agent', text: msg });
-    const displayMsg = msg.replace(/\*\*[\s\S]*?\*\*/g, '').trim();
-    if (displayMsg) {
-      setCurrentMessage((prev) => (prev === "Analyzing..." ? displayMsg : prev + " " + displayMsg));
+    
+    const current = transcriptRef.current;
+    const last = current[current.length - 1];
+    if (last && last.speaker === 'agent') {
+      const fullText = last.text;
+      // Filter out model thinking tags (e.g. <thought>...</thought>) and bold markers
+      const displayMsg = fullText
+        .replace(/<thought>[\s\S]*?<\/thought>/gi, '')
+        .replace(/\*\*[\s\S]*?(\*\*|$)/g, '')
+        .trim();
+      setCurrentMessage(displayMsg || "Analyzing...");
       setIsListening(true);
     }
   }, [addToTranscript])
@@ -217,7 +225,9 @@ export function SessionView({ onStop }: { onStop: (summary?: any) => void }) {
       )}
 
       <div className="absolute bottom-10 left-0 right-0 flex flex-col items-center gap-6 px-6">
-        <div className="text-white text-center text-sm max-w-md bg-black/50 p-4 rounded-xl backdrop-blur-md min-h-[60px] w-full border border-white/10">{currentMessage || "Connecting to Aria..."}</div>
+        <div className="text-white text-center text-sm max-w-md bg-black/50 p-4 rounded-xl backdrop-blur-md min-h-[60px] w-full border border-white/10 flex items-center justify-center">
+          {isStopping ? currentMessage : "Consulting with MedLens..."}
+        </div>
         <button 
           disabled={isStopping}
           onClick={async () => {

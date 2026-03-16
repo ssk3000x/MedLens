@@ -12,7 +12,7 @@ const steps = [
   {
     number: "02",
     icon: Mic,
-    title: "Talk to Aria",
+    title: "Talk to MedLens",
     description: 'Ask questions naturally: "Can I take this with grapefruit?" Aria responds with context from your health records.',
     detail: "Interruptible at any time — just speak",
   },
