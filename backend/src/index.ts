@@ -32,7 +32,10 @@ if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
 }
 
 // ── Anthropic init ─────────────────────────────────────────────────────────
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || 'empty_key' });
+const anthropic = new Anthropic({ 
+  apiKey: process.env.ANTHROPIC_API_KEY || 'empty_key',
+  maxRetries: 3 
+});
 
 // ── Tavily ─────────────────────────────────────────────────────────────────
 const TAVILY_API_KEY = process.env.TAVILY_API_KEY || '';
