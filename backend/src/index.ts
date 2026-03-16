@@ -245,7 +245,7 @@ wss.on('connection', (ws: any) => {
   ws.on('close', () => { if (geminiSocket) geminiSocket.close(); });
 });
 
-// ── POST /summarize ────────────────────────────────────────────────────────
+// ── POST /summarize using Gemini Flash Lite ────────────────────────────────────────────────────────
 app.post('/summarize', async (req, res) => {
   const { transcript, userId } = req.body || {};
   console.log(`📩 Summarize request: ${Array.isArray(transcript) ? transcript.length : 0} messages. userId: ${userId || 'anonymous'}`);
