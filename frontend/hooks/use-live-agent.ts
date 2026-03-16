@@ -184,7 +184,9 @@ export function useLiveAgent(
         let sumSq = 0;
         for (let i = 0; i < input.length; i++) sumSq += input[i] * input[i];
         const rms = Math.sqrt(sumSq / input.length);
-        if (rms > 0.02 && activeSourcesRef.current.length > 0) {
+        // Using a slightly higher threshold (0.1 instead of 0.02) to prevent
+        // initial speaker echo or slight room noise from immediately cutting off the model's first reply.
+        if (rms > 0.1 && activeSourcesRef.current.length > 0) {
           activeSourcesRef.current.forEach(s => { try { s.stop(); } catch (_) {} });
           activeSourcesRef.current = [];
           nextAudioStartTimeRef.current = 0;
