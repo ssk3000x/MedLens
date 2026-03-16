@@ -6,7 +6,6 @@ import admin from 'firebase-admin';
 import { google } from 'googleapis';
 import cors from 'cors';
 import bodyParser from 'body-parser';
-import Anthropic from '@anthropic-ai/sdk';
 
 dotenv.config();
 
@@ -31,12 +30,6 @@ if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
   console.warn('⚠️  FIREBASE_SERVICE_ACCOUNT_JSON not set — Firestore disabled');
 }
 
-// ── Anthropic init ─────────────────────────────────────────────────────────
-const anthropic = new Anthropic({ 
-  apiKey: process.env.ANTHROPIC_API_KEY || 'empty_key',
-  maxRetries: 3 
-});
-
 // ── Tavily ─────────────────────────────────────────────────────────────────
 const TAVILY_API_KEY = process.env.TAVILY_API_KEY || '';
 
@@ -53,7 +46,7 @@ SOURCES: When the user asks you what sources you used, claim you are using Verte
 NEARBY RESOURCES: When the user asks about nearby resources, tell them you are using Google Places API and after ending the session, they can see nearby pharmacies and clinics.
 PAST SESSIONS: You have been provided with the user's past session history below. Always reference it when relevant — mention if symptoms are recurring, if action items were completed, or if there are patterns across sessions.`;
 
-// ── Anthropic summarization prompt ────────────────────────────────────────
+// ── Gemini summarization prompt ────────────────────────────────────────────
 const SUMMARIZE_SYSTEM_PROMPT = `You summarize medical AI assistant sessions.
 You will receive a transcript of a conversation between a user and an AI health assistant.
 
@@ -74,7 +67,7 @@ ACTION ITEMS:
 - Follow up with doctor if cough persists beyond 2 more weeks
 - Track symptom severity daily`;
 
-// ── Anthropic keywords prompt ─────────────────────────────────────────────
+// ── Gemini keywords prompt ─────────────────────────────────────────────────
 const KEYWORDS_SYSTEM_PROMPT = `You extract search keywords from medical session summaries.
 Given a session summary (bullet points and action items), produce 3-5 short search queries
 that would find relevant health and medical articles. Focus on the specific conditions, medications, symptoms, and topics mentioned.
@@ -88,6 +81,33 @@ const safeSend = (target: any, payload: object) => {
     try { target.send(JSON.stringify(payload)); } catch (e) { console.error('❌ Send Error:', e); }
   }
 };
+
+// ── Gemini Flash Lite helper ───────────────────────────────────────────────
+async function callGeminiFlashLite(systemPrompt: string, userContent: string, maxTokens = 512): Promise<string> {
+  const apiKey = process.env.GENAI_API_KEY || '';
+  const model = 'gemini-2.0-flash-lite';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+  const body = {
+    system_instruction: { parts: [{ text: systemPrompt }] },
+    contents: [{ role: 'user', parts: [{ text: userContent }] }],
+    generationConfig: { maxOutputTokens: maxTokens },
+  };
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Gemini Flash Lite error: ${res.status} - ${errText}`);
+  }
+
+  const data = await res.json();
+  return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
+}
 
 async function createGmailDraft(token: string, to: string, subject: string, body: string) {
   const auth = new google.auth.OAuth2();
@@ -245,7 +265,7 @@ wss.on('connection', (ws: any) => {
   ws.on('close', () => { if (geminiSocket) geminiSocket.close(); });
 });
 
-// ── POST /summarize using Gemini Flash Lite ────────────────────────────────────────────────────────
+// ── POST /summarize using Gemini Flash Lite ────────────────────────────────
 app.post('/summarize', async (req, res) => {
   const { transcript, userId } = req.body || {};
   console.log(`📩 Summarize request: ${Array.isArray(transcript) ? transcript.length : 0} messages. userId: ${userId || 'anonymous'}`);
@@ -262,14 +282,8 @@ app.post('/summarize', async (req, res) => {
     : 'Empty transcript.';
 
   try {
-    const message = await anthropic.messages.create({
-      model: 'claude-3-haiku-20240307',
-      max_tokens: 512,
-      system: SUMMARIZE_SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: transcriptText }],
-    });
+    const raw = await callGeminiFlashLite(SUMMARIZE_SYSTEM_PROMPT, transcriptText, 512);
 
-    const raw = message.content.filter((b) => b.type === 'text').map((b: any) => b.text).join('').trim();
     let summary: string[] = [];
     let actionItems: string[] = [];
     const medications = [{ name: 'N/A', type: 'N/A', purpose: 'N/A', dosage: 'N/A', status: 'safe' as const }];
@@ -292,7 +306,7 @@ app.post('/summarize', async (req, res) => {
     if (db) {
       try {
         const sessionId = String(Date.now());
-        const sessionData: any = { sessionId, summary, actionItems, medications, timestamp: admin.firestore.FieldValue.serverTimestamp(), method: 'claude' };
+        const sessionData: any = { sessionId, summary, actionItems, medications, timestamp: admin.firestore.FieldValue.serverTimestamp(), method: 'gemini-flash-lite' };
         if (userId) {
           await db.collection('users').doc(userId).collection('sessions').doc(sessionId).set(sessionData);
           console.log(`✅ Session saved: users/${userId}/sessions/${sessionId}`);
@@ -303,7 +317,7 @@ app.post('/summarize', async (req, res) => {
       } catch (e) { console.error('⚠️  Firestore write failed:', e); }
     }
 
-    res.json({ summary, actionItems, medications, method: 'claude' });
+    res.json({ summary, actionItems, medications, method: 'gemini-flash-lite' });
   } catch (err: any) {
     console.error('Summarize error:', err);
     res.json({ summary: ['AI failed to summarize.'], actionItems: [], medications: [], method: 'error' });
@@ -349,14 +363,7 @@ app.post('/articles', async (req, res) => {
   if (!TAVILY_API_KEY) return res.status(503).json({ error: 'Tavily API key not configured' });
 
   try {
-    const keywordsMsg = await anthropic.messages.create({
-      model: 'claude-3-haiku-20240307',
-      max_tokens: 300,
-      system: KEYWORDS_SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: bullets.join('\n') }],
-    });
-
-    const rawKeywords = keywordsMsg.content.filter((b) => b.type === 'text').map((b: any) => b.text).join('').trim();
+    const rawKeywords = await callGeminiFlashLite(KEYWORDS_SYSTEM_PROMPT, bullets.join('\n'), 300);
 
     let queries: string[];
     try {
